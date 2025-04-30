@@ -1,0 +1,106 @@
+[
+    {
+      "noteTxt": "PATIENT WANTS TO TALK TO MD REGARDING RX#10210309",
+      "noteSummaryTxt": "PATIENT WANTS TO TALK TO MD REGARDING RX#10210309",
+      "createDate": "03/25/2025 07:31:49 PM",
+      "noteId": "2147949351",
+      "noteTypeCd": "BIL",
+      "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
+    },
+    {
+      "noteTxt": "NPS REPORTED FOR FEP PRESCRIPTIONS FOR HUMIRA",
+      "noteSummaryTxt": "NPS REPORTED FOR FEP PRESCRIPTIONS FOR HUMIRA",
+      "createDate": "03/21/2025 03:51:41 PM",
+      "noteId": "2147945703",
+      "noteTypeCd": "BIL",
+      "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
+    },
+    {
+      "noteTxt": "TOPIC : INSURANCE CELL PHONE NUMBER : 4379883916\\u00a0 EMAIL ADDRESS : Anup.Kumar2@CVSHealth.com\\u00a0 TEXT SENT ON:03/21/2025 01:39:46 PM\\u00a0 AKUMAR4(EMP) Sent :\\u00a0 SMS TO PATIENT : Test\\u00a0 EMAIL TO PATIENT : test\\u00a0 EMAIL SUBJECT LINE : test\\u00a0 SECURE MESSAGE BEHIND LINK : Insurance team want to inform the update in the covergae for drug HUMIRA PEN (2/BOX) (ABB)\\u00a0 BrandIND:CVS OrgId:1 DivisionId:1 ClientCD:CVS LOBCode:00 CarrierId: AccountNo: GroupNo:",
+      "noteSummaryTxt": "<SM><INSURANCE(SM)>",
+      "createDate": "03/21/2025 03:39:46 PM",
+      "noteId": "2147945694",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "MD CALLED FOR HUMIRA PEN (2/BOX) (ABB)",
+      "noteSummaryTxt": "MD CALLED FOR HUMIRA PEN (2/BOX) (ABB)",
+      "createDate": "03/21/2025 01:36:33 PM",
+      "noteId": "2147945570",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "MD CALLED FOR HUMIRA",
+      "noteSummaryTxt": "MD CALLED FOR HUMIRA",
+      "createDate": "03/20/2025 05:34:53 PM",
+      "noteId": "2147944956",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "ADDED NOTES FOR HUMIRA",
+      "noteSummaryTxt": "ADDED NOTES FOR HUMIRA",
+      "createDate": "03/20/2025 10:48:33 AM",
+      "noteId": "2147944391",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "GEN NOTE ADDED FOR T6 HUMIRA",
+      "noteSummaryTxt": "GEN NOTE ADDED FOR T6 HUMIRA",
+      "createDate": "03/20/2025 12:21:52 AM",
+      "noteId": "2147944061",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "GEN NOTE ADDED FOR HUMIRA PEN(2/BOX) (ABB)",
+      "noteSummaryTxt": "GEN NOTE ADDED FOR HUMIRA PEN(2/BOX) (ABB)",
+      "createDate": "03/20/2025 12:21:11 AM",
+      "noteId": "2147944059",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "GEN NOTE ADDED FOR HUMIRA 40 MG SYRINGE(2/BOX)",
+      "noteSummaryTxt": "GEN NOTE ADDED FOR HUMIRA 40 MG SYRINGE(2/BOX)",
+      "createDate": "03/20/2025 12:20:29 AM",
+      "noteId": "2147944058",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "Received\\u00a0 with <RX> for <HUMIRA 20MG SYRINGE> within SPRx Intake.\\u00a0 Doc(s) can be viewed within Pt SPRx Profile-Images",
+      "noteSummaryTxt": "Received\\u00a0 with <RX> for <HUMIRA 20MG SYR",
+      "createDate": "03/19/2025 07:06:30 PM",
+      "noteId": "2147943900",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "noteTxt": "Patient enrolled via < CAREGIVER PHONE ENROLLMENT > by < QATST_R1 >, Phone/Fax #: <\\u00a0 >, <\\u00a0 > for < HUMIRA 20MG SYRINGE, TRUVADA >.\\u00a0 Method to obtain rx: <\\u00a0 >. Referring MD: <\\u00a0 \\u00a0> <\\u00a0 >.",
+      "noteSummaryTxt": "New Patient Enrollment",
+      "createDate": "03/19/2025 07:01:09 PM",
+      "noteId": "2147943894",
+      "noteTypeCd": "GEN",
+      "noteTypeInd": "GENERAL"
+    },
+    {
+      "finalDisplayEntityId": "10210308-00",
+      "medicineName": "HUMIRA 40MG SYRINGE (2/BOX)"
+    },
+    {
+      "finalDisplayEntityId": "10210310-00",
+      "medicineName": "HUMIRA PEN (2/BOX) (ABB)"
+    },
+    {
+      "finalDisplayEntityId": "10210311-00",
+      "medicineName": "T6 HUMIRA"
+    },
+    {
+      "finalDisplayEntityId": "10210309-00",
+      "medicineName": "HUMIRA PEN (2/BOX)"
+    }
+  ]

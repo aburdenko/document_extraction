@@ -111,6 +111,35 @@ def process_prescriptions(json_data):
 "type": "object"
 }```
 
+{
+  "properties": {
+    "rxNumber": {
+      "description": "Specify the prescription number (Rx) related to this task. Fetch the Rx Number from the field finalDisplayEntityId.",
+      "title": "Rxnumber",
+      "type": "string",
+      "pattern": "N/A"
+    },
+    "drugName": {
+      "description": "Provide the name of the drug from medicineName associated with the Rx number.",
+      "title": "Drugname",
+      "type": "string",
+      "pattern": "N/A"
+    },
+    "bilNotesSummary": {
+      "description": "Follow **Bil Notes Summary** Instructions to provide the summary. This property is an array, where each item is a 'NoteSummary' object. Each 'NoteSummary' should contain 'noteDate' (string, date when the note was created) and 'summaryText' (string, summary text of the note).",
+      "title": "Bilnotessummary",
+      "type": "array",
+      "pattern": "N/A"
+    },
+    "genNotesSummary": {
+      "description": "Follow **Gen Notes Summary** Instructions to provide the summary. This property is an array, where each item is a 'NoteSummary' object. Each 'NoteSummary' should contain 'noteDate' (string, date when the note was created) and 'summaryText' (string, summary text of the note).",
+      "title": "Gennotessummary",
+      "type": "array",
+      "pattern": "N/A"
+    }
+  }
+}
+
 Use the following data mapping guidelines:
 
 * taskName: Extract from patient_task_history_details.

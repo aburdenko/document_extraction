@@ -1,12 +1,12 @@
 #! /usr/bin/bash
 # Run with source /home/user/cvs-specialty-pharma/.scripts/configure.sh
 
-# Update package lists and install python3-venv if needed
-sudo apt update && sudo apt install -y python3-venv
 
 # Create the virtual environment
 # Check if .venv directory already exists to avoid errors on re-runs
 if [ ! -d ".venv" ]; then
+  # Update package lists and install python3-venv if needed
+  sudo apt update && sudo apt install -y python3-venv
   echo "Creating Python virtual environment '.venv'..."
   python3 -m venv .venv
 else
@@ -21,7 +21,8 @@ pip install -r $SCRIPT_DIR/requirements.txt
 # --- Authentication Setup ---
 # Define the expected path to the service account key file
 # Assuming it's in the same directory as the script for this example
-SERVICE_ACCOUNT_KEY_FILE="${SCRIPT_DIR}/../.creds/service_account.json" # Or provide an absolute path
+#SERVICE_ACCOUNT_KEY_FILE="${SCRIPT_DIR}/../.creds/service_account.json" # Or provide an absolute path
+SERVICE_ACCOUNT_KEY_FILE="${SCRIPT_DIR}/.creds/service_account.json" # Or provide an absolute path
 
 # Check if the service account key file exists
 if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
