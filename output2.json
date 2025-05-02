@@ -1,0 +1,66 @@
+[
+    {
+        "rxNumber": "10208441-00",
+        "drugName": "SPRAVATO 56MG DOSE KIT",
+        "bilNotesSummary": [],
+        "genNotesSummary": [
+            {
+                "noteDate": "02/17/2025",
+                "summaryText": "02/17/2025:SPRAVATO is a good drug,can be taken for multiple disease."
+            }
+        ]
+    },
+    {
+        "rxNumber": "10207950-00",
+        "drugName": "NUPLAZID 56 MG",
+        "bilNotesSummary": [
+            {
+                "noteDate": "03/25/2025",
+                "summaryText": "03/25/2025: NUPLAZID PRESCRPTION IS A KIND OF HEMO TYPE.. PATIENT EHR_IND TURNS TO Y DUE TO NUPLAZID 40 MG. BOARD OF PHARMACY HAD TAKEN LEGAL ACTION FOR PAYOR OF NUPLAZID.EHR TEAM CONNECTED FOR RX# 10207950 FOR PROCESSING THE RX."
+            }
+        ],
+        "genNotesSummary": [
+            {
+                "noteDate": "02/17/2025",
+                "summaryText": "02/17/2025: Patient enrolled via < FAX > by < ORGB_002 >, Phone/Fax #: < >, < > for < NUPLAZID >. Method to obtain rx: < >. Referring MD: < USERONE AUTOMATION > < >.. Received <8793279> with <RX> for <NUPLAZID 56 MG> within SPRx Intake. Doc(s) can be viewed within Pt SPRx Profile-Images.MANAGER CALLED RX# 10207950 IS AN EPC PRESCRIPTION."
+            },
+            {
+                "noteDate": "02/18/2025",
+                "summaryText": "02/18/2025: Received with for <NUPLAZID 10 MG> within SPRx Intake."
+            }
+        ]
+    },
+    {
+        "rxNumber": "10208443-00",
+        "drugName": "SPRAVATO 84MG DOSE KIT",
+        "bilNotesSummary": [],
+        "genNotesSummary": [
+            {
+                "noteDate": "02/17/2025",
+                "summaryText": "02/17/2025:SPRAVATO is a good drug,can be taken for multiple disease."
+            }
+        ]
+    },
+    {
+        "rxNumber": "10208432-00",
+        "drugName": "F7 SPRAVATO",
+        "bilNotesSummary": [],
+        "genNotesSummary": [
+            {
+                "noteDate": "03/25/2025",
+                "summaryText": "03/25/2025: MANAGER CALLED regarding F7 Spravato."
+            }
+        ]
+    },
+    {
+        "rxNumber": "10208478-00",
+        "drugName": "A1 NUPLAZID",
+        "bilNotesSummary": [
+            {
+                "noteDate": "03/28/2025",
+                "summaryText": "03/28/2025: PATIENT BILLING TO A1 NUPLAZID."
+            }
+        ],
+        "genNotesSummary": []
+    }
+]
