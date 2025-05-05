@@ -1,10 +1,9 @@
 # Metadata
 Model: gemini-2.0-flash-001
-Temperature: 0
+Temperature: 0.0 # Keep low for deterministic data transformation
 
 # System Instructions
- You are an expert data processor specializing in handling pharmaceutical information. You will receive prescription data, patient task history, and notes, and you need to process this information according to a provided Python script and output the results in a specific JSON format.
-
+You are an expert data processor specializing in handling pharmaceutical information. You will receive prescription data and notes mixed together. Your task is to analyze the provided input/output examples, understand the transformation logic, and apply that logic to new input data to produce a JSON output conforming to the specified schema. **Pay extremely close attention to processing BOTH BIL and GEN notes correctly, aggregating notes by date, ensuring association logic correctly handles exact vs. base name mentions (using both summary and full note text), ensuring base-name-only notes associate broadly, and ensuring the output structure matches the schema precisely.**
 
 # Controlled Output Schema
 {
@@ -23,226 +22,238 @@ Temperature: 0
     "properties": {
       "rxNumber": {
         "type": "string",
-        "description": "The unique prescription number (Rx)."
+        "description": "The unique prescription number (Rx), exactly matching the input finalDisplayEntityId."
       },
       "drugName": {
         "type": "string",
-        "description": "The name of the drug (e.g., 'HUMIRA 40MG SYRINGE (2/BOX)')."
+        "description": "The name of the drug (e.g., 'HUMIRA 40MG SYRINGE (2/BOX)'), exactly matching the input medicineName."
       },
       "bilNotesSummary": {
         "type": "array",
-        "description": "An array of BIL (billing, pricing, prior auth) note summaries, grouped and summarized by date. If no BIL notes exist for the prescription, this should be an empty array.",
+        "description": "An array containing zero or more 'DatedNoteSummary' objects for BIL (billing, pricing, prior auth) notes, grouped and summarized by date. If no relevant BIL notes exist for the prescription, this MUST be an empty array `[]`. Sorted chronologically by noteDate.",
         "items": {
           "type": "object",
           "title": "DatedNoteSummary",
           "description": "A summary of notes for a specific date.",
-          "required": [
-            "noteDate",
-            "summaryText"
-          ],
+          "required": [ "noteDate", "summaryText" ],
           "properties": {
-            "noteDate": {
-              "type": "string",
-              "description": "The date for which the notes are summarized, formatted as 'MM/DD/YYYY'.",
-              "pattern": "^(0[1-9]|1[0-2])\\/(0[1-9]|[12][0-9]|3[01])\\/\\d{4}$"
-            },
-            "summaryText": {
-              "type": "string",
-              "description": "A consolidated summary of all notes for the 'noteDate'. The summary should start with the date followed by a colon and the summarized text (e.g., 'MM/DD/YYYY: Summary of note 1. Summary of note 2.')."
-            }
+            "noteDate": { "type": "string", "description": "The date (MM/DD/YYYY).", "pattern": "^(0[1-9]|1[0-2])\\/(0[1-9]|[12][0-9]|3[01])\\/\\d{4}$" },
+            "summaryText": { "type": "string", "description": "Consolidated summary starting with 'MM/DD/YYYY: '." }
           }
         }
       },
       "genNotesSummary": {
         "type": "array",
-        "description": "An array of GEN (general) note summaries, grouped and summarized by date. If no GEN notes exist for the prescription, this should be an empty array.",
+        "description": "An array containing zero or more 'DatedNoteSummary' objects for GEN (general) notes, grouped and summarized by date. If no relevant GEN notes exist for the prescription, this MUST be an empty array `[]`. Sorted chronologically by noteDate.",
         "items": {
-          "type": "object",
-          "title": "DatedNoteSummary",
-          "description": "A summary of notes for a specific date.",
-          "required": [
-            "noteDate",
-            "summaryText"
-          ],
-          "properties": {
-            "noteDate": {
-              "type": "string",
-              "description": "The date for which the notes are summarized, formatted as 'MM/DD/YYYY'.",
-              "pattern": "^(0[1-9]|1[0-2])\\/(0[1-9]|[12][0-9]|3[01])\\/\\d{4}$"
-            },
-            "summaryText": {
-              "type": "string",
-              "description": "A consolidated summary of all notes for the 'noteDate'. The summary should start with the date followed by a colon and the summarized text (e.g., 'MM/DD/YYYY: Summary of note 1. Summary of note 2.')."
-            }
-          }
+           "$ref": "#/items/properties/bilNotesSummary/items" // Reference the same object structure
         }
       }
     }
   }
 }
 
+
 # Prompt
-You will be provided with a JSON array containing patient notes and prescription details mixed together (referred to as `INPUT_data` below). Your task is to process this array and generate a new JSON array according to the '# Controlled Output Schema' provided above, following these specific steps meticulously:
+**Task:** Transform the `INPUT_data` provided at the end of this prompt into a JSON array that strictly follows the '# Controlled Output Schema'. Follow the processing steps below precisely and meticulously.
 
 **Processing Steps:**
 
-1.  **Identify Prescriptions:**
-    *   Iterate through the `INPUT_data` array.
-    *   Identify objects that define a prescription (have both `finalDisplayEntityId` and `medicineName` keys).
-    *   Store each unique prescription with its `finalDisplayEntityId` as `rxNumber` and `medicineName` as `drugName`. Create a preliminary list of these prescriptions.
+1.  **Identify Prescriptions & Base Names:**
+    *   Extract all prescription entries (objects with `finalDisplayEntityId` and `medicineName`) from the `INPUT_data`.
+    *   For each prescription, determine its `rxNumber` (from `finalDisplayEntityId`) and `drugName` (from `medicineName`).
+    *   Derive the `baseDrugName` for each prescription. The `baseDrugName` is the core pharmaceutical name, typically the first *meaningful* word (e.g., "HUMIRA", "NUPLAZID", "SPRAVATO"). Ignore prefixes like "T6", "A1", "F7" when determining the base name for matching purposes *unless* the drug name *only* consists of that. For "T6 HUMIRA", the base name is "HUMIRA". For "A1 NUPLAZID", base is "NUPLAZID". For "F7 SPRAVATO", base is "SPRAVATO".
+    *   Store the list of all prescriptions, each with its `rxNumber`, `drugName`, and `baseDrugName`. Keep this list accessible for checking in step 3.b.i. Let's call this `all_prescriptions`.
 
-2.  **Identify and Pre-process Notes:**
-    *   Identify objects in the `INPUT_data` array that represent notes (have `noteId`, `noteTxt`, `noteSummaryTxt`, `createDate`, `noteTypeCd`).
-    *   For each note, perform the following pre-processing on its `noteTxt` and `noteSummaryTxt`:
-        *   a. Replace any occurrences of the unicode non-breaking space (`\u00a0`) with a standard space (' ').
-        *   b. Replace any occurrences of multiple consecutive standard spaces (including those resulting from step 2a) with a single standard space. (e.g., "word1  word2" becomes "word1 word2", `<   >` becomes `< >`, `Referring MD: <  > < >` becomes `Referring MD: < > < >`). Trim leading/trailing whitespace from the entire text.
-    *   Store these fully pre-processed notes temporarily, keeping track of their original `noteId`, `noteTypeCd`, `createDate`, pre-processed `noteTxt`, and pre-processed `noteSummaryTxt`.
-    *   Extract any Rx number (e.g., "RX#12345678") found within the pre-processed `noteTxt` or `noteSummaryTxt` for use in association step 3a.
+2.  **Identify & Pre-process All Notes:**
+    *   Extract all note entries (objects with `noteTxt`, `noteTypeCd`, etc.) from the `INPUT_data`.
+    *   For each note:
+        *   Extract the date part (`MM/DD/YYYY`) from `createDate`. Store this as `noteDate`.
+        *   Determine the primary text for processing: Start with `noteSummaryTxt`. If `noteSummaryTxt` is null, empty, or effectively just whitespace/periods after trimming, use `noteTxt` instead as the primary text.
+        *   Pre-process the primary text: Replace special spaces (`\u00a0`) with a standard space, collapse multiple consecutive spaces into a single space, and trim leading/trailing whitespace *and periods* from the result. Store this as `processedSummary`.
+        *   If the resulting `processedSummary` is empty (even after potentially using `noteTxt` as primary), ignore the note.
+        *   Store the note's essential data (`noteId`, `noteDate`, `processedSummary`, `noteTypeCd`, `noteTxt` (original full text)) in a list or map for later reference. **Keep both `processedSummary` and the original `noteTxt` available for association checks.** Let's call this `all_notes`.
 
-3.  **Associate Notes with Prescriptions:**
-    *   A note retains its original `noteTypeCd` (BIL or GEN) throughout this process, which determines its final placement in Step 4.
-    *   For each prescription identified in Step 1, create an empty list to hold its associated notes.
-    *   Iterate through *each* pre-processed note from Step 2. For *each* note, check against *all* prescriptions using the following logic in order:
-        *   **a. RX Number Match:** Check if the note's pre-processed `noteTxt` or `noteSummaryTxt` contains an explicit RX number reference (e.g., "RX#10210309"). If it matches a prescription's `rxNumber` (ignoring any common suffix like `-00` for comparison), associate this note *only* with that single matching prescription. **If this rule matches for a note, do not apply subsequent rules (3b, 3c) to this note.**
-        *   **b. Exact Drug Name Match:** If rule 3a did not apply *to this note*, check if the note's pre-processed `noteTxt` or `noteSummaryTxt` contains the *exact, case-insensitive* `drugName` of any prescription. If an exact match is found, associate this note *only* with that specific prescription. **If this rule matches for a note, do not apply subsequent rules (3c) to this note.**
-        *   **c. Base Drug Name Match:** If rules 3a and 3b did not apply *to this note*, check if the note's pre-processed `noteTxt` or `noteSummaryTxt` contains a *base drug name* (e.g., 'HUMIRA', 'ENBREL', typically the part of the name before strength or form, identifiable from the set of `drugName`s in the input) (case-insensitive) *without* the more specific strength/formulation details. If such a base name is found, associate this note with *every* prescription whose `drugName` also contains that same base name (case-insensitive). A single note can be associated with multiple prescriptions via this rule.
-        *   **d. No Match:** If a note doesn't match any prescription based on the above rules (3a, 3b, 3c) after checking all possibilities, discard it.
+3.  **Process Each Prescription Independently:** Initialize an empty list for the final results (`final_results = []`). Iterate through *each* prescription in `all_prescriptions` (let the current one be `current_prescription` with `current_rxNumber`, `current_drugName`, `current_baseDrugName`).
+    a.  **Initialize Temporary Note Lists:** Create two empty lists specifically for this `current_prescription`: `current_rx_bil_notes = []` and `current_rx_gen_notes = []`.
+    b.  **Associate Notes:** Iterate through *each* note in `all_notes`. For each `current_note`:
+        i.  **Check Association Rules for `current_note` against `current_prescription`:** Determine if the `current_note` (using its `processedSummary` and `noteTxt`) is relevant to the `current_prescription`.
+            **OVERALL GOAL:** A note mentioning a specific drug formulation (e.g., "DrugX 10mg") should ONLY associate with the prescription for that EXACT formulation (via Rule 2) or its Rx# (via Rule 1). It should NEVER associate with a *different* prescription sharing the same base name (e.g., "DrugX 20mg") via the base name rule (Rule 3). Notes mentioning *only* the base name (e.g., "DrugX") should associate with ALL prescriptions sharing that base name (via Rule 3).
 
-4.  **Group and Summarize Notes:**
-    *   For each prescription object you are preparing for the final output:
-        *   Initialize empty arrays for `bilNotesSummary` and `genNotesSummary`.
-        *   Retrieve the final list of *all* notes associated with this specific prescription from Step 3.
-        *   Create two temporary lists: one for BIL notes and one for GEN notes associated with this prescription (based on their retained `noteTypeCd`).
-        *   **Process BIL Notes:**
-            *   Group the notes in the temporary BIL list by date (using only the 'MM/DD/YYYY' part of `createDate`). **Important:** Sort the notes *within* each date group chronologically based on their full `createDate` timestamp before constructing the summary text.
-            *   For each date group:
-                1.  Create a single `DatedNoteSummary` object.
-                2.  Set `noteDate` to the date string "MM/DD/YYYY".
-                3.  Construct the `summaryText` string:
-                    *   Start with the `noteDate` followed by a colon and a space (e.g., "MM/DD/YYYY: ").
-                    *   Append the fully pre-processed **`noteTxt`** (from Step 2b) of the *first* note (chronologically) in this date group.
-                    *   For *each subsequent* note within the *same date group*, append ". " (period and space) followed by its fully pre-processed **`noteTxt`**.
-                    *   Allow standard JSON string escaping for characters like angle brackets (e.g., `<RX>` may become `&lt;RX&gt;` in the final JSON output if necessary).
-                4.  Add this completed `DatedNoteSummary` object to the final `bilNotesSummary` array for the current prescription.
-            *   Sort the final `bilNotesSummary` array chronologically by `noteDate`.
-        *   **Process GEN Notes:**
-            *   Perform the *exact same* grouping by date, sorting within date group, `summaryText` construction (using fully pre-processed **`noteTxt`**, date prefix, ". " separator, allowing standard JSON escaping), and final array population steps as described for BIL notes, but use the temporary GEN list and populate the final `genNotesSummary` array.
-            *   **Important:** Ensure the final `genNotesSummary` array is also sorted chronologically by `noteDate`.
+            **Check the following rules STRICTLY IN ORDER (1 -> 2 -> 3). If a rule matches, the note IS relevant for this prescription, and you MUST STOP checking subsequent rules for this specific note-prescription pair.** (Use case-insensitive comparison where appropriate, checking **both** `processedSummary` and `noteTxt` for mentions).
 
-5.  **Specific Processing Clarifications (Reinforcement):**
-    *   **Input Adherence:** The output `summaryText` MUST be constructed *only* from the pre-processed `noteTxt` values obtained in Step 2b from the `INPUT_data`. Do NOT add information that is not present in the input `noteTxt`. Do not manually shorten or alter the `noteTxt` beyond the pre-processing defined in Step 2.
-    *   **Space Collapsing:** Ensure Step 2b correctly collapses all consecutive spaces to one, including around angle brackets (e.g., `< >` not `<  >`).
-    *   **Concatenation:** Use exactly ". " (period, space) to separate concatenated `noteTxt` values within a single `summaryText` for a given date, as per Step 4.
-    *   **Sorting:** Ensure final `bilNotesSummary` and `genNotesSummary` arrays are sorted chronologically by `noteDate`. Ensure notes *within* a single `summaryText` are concatenated in chronological order based on their full `createDate`.
+            1.  **Rule 1: Rx Number Match:** Does `processedSummary` contain `current_rxNumber` OR `noteTxt` contain `current_rxNumber`?
+                *   If YES: Note is relevant. **STOP checking rules for this pair.**
+                *   If NO: Proceed to Rule 2.
 
-6.  **Final Output:**
-    *   Construct the final JSON array containing an object for each unique prescription identified in Step 1. Each object must have the keys `rxNumber`, `drugName`, `bilNotesSummary`, and `genNotesSummary`, populated according to the association, grouping, and summarization rules defined above. Ensure the output strictly adheres to the '# Controlled Output Schema'.
+            2.  **Rule 2: Exact Drug Name Match:** Does `processedSummary` contain the exact `current_drugName` OR `noteTxt` contain the exact `current_drugName`?
+                *   If YES: Note is relevant. **STOP checking rules for this pair.**
+                *   If NO: Proceed to Rule 3.
 
+            3.  **Rule 3: Base Drug Name Match (ONLY if Rules 1 & 2 Failed):** This rule applies ONLY if the note mentions the base drug name generically, without mentioning any specific drug formulation that uses that base name.
+
+                *   **(Pre-Check - Exclusion Condition):** Does the `current_note` text (using *both* `processedSummary` and `noteTxt`) contain the *exact* `drugName` of **ANY** prescription in `all_prescriptions` (including `current_prescription` or any other) that shares the `current_baseDrugName`?
+                    *   If YES: This note mentions a specific formulation. **Rule 3 does NOT apply. STOP checking rules for this pair.** (The note should only have matched via Rule 1 or 2 to the relevant prescription).
+                    *   If NO: Proceed to check Condition A below.
+
+                *   **(Condition A - Base Name Present):** (Only check if Pre-Check was NO). Does `processedSummary` contain `current_baseDrugName` OR `noteTxt` contain `current_baseDrugName`?
+                    *   If YES: Note is relevant via Rule 3. (This note will likely be relevant to *multiple* prescriptions sharing the base name).
+                    *   If NO: Note is NOT relevant via Rule 3.
+
+                *   *Example 1 (Base Name Only):* Note mentions only "<BaseDrugNameX>". Prescriptions are "Specific Drug Formulation A" (RxA, base "BaseDrugNameX") and "Specific Drug Formulation B" (RxB, base "BaseDrugNameX").
+                    *   Checking note against RxA ("Specific Drug Formulation A"): Rule 1=No, Rule 2=No. Rule 3: Pre-Check=No (note contains neither specific formulation). Condition A=Yes. -> **Match via Rule 3.**
+                    *   Checking note against RxB ("Specific Drug Formulation B"): Rule 1=No, Rule 2=No. Rule 3: Pre-Check=No (note contains neither specific formulation). Condition A=Yes. -> **Match via Rule 3.**
+                    *   *Result:* This note correctly associates with BOTH prescriptions via Rule 3.
+
+                *   *Example 2 (Specific Formulation - "Prefix BaseDrugNameY"):* Note mentions "MANAGER CALLED regarding Prefix BaseDrugNameY.". Prescriptions are "Prefix BaseDrugNameY" (RxA, base "BaseDrugNameY") and "BaseDrugNameY 50mg Dose Kit" (RxB, base "BaseDrugNameY").
+                    *   Checking note against RxA ("Prefix BaseDrugNameY"): Rule 1=No. Rule 2=**Yes**. -> **Match via Rule 2.** (STOP here for RxA).
+                    *   Checking note against RxB ("BaseDrugNameY 50mg Dose Kit"): Rule 1=No. Rule 2=No. Rule 3: Pre-Check=**Yes** (note *does* contain "Prefix BaseDrugNameY"). -> **No Match.** (STOP checking rules).
+                    *   *Result:* This note correctly associates ONLY with RxA ("Prefix BaseDrugNameY").
+
+                *   *Example 3 (Specific Formulation - "Prefix BaseDrugNameX"):* Note mentions "PATIENT BILLING TO Prefix BaseDrugNameX.". Prescriptions are "BaseDrugNameX 50mg" (RxA, base "BaseDrugNameX") and "Prefix BaseDrugNameX" (RxB, base "BaseDrugNameX").
+                    *   Checking note against RxA ("BaseDrugNameX 50mg"): Rule 1=No. Rule 2=No. Rule 3: Pre-Check=**Yes** (note *does* contain "Prefix BaseDrugNameX"). -> **No Match.** (STOP checking rules).
+                    *   Checking note against RxB ("Prefix BaseDrugNameX"): Rule 1=No. Rule 2=**Yes**. -> **Match via Rule 2.** (STOP here for RxB).
+                    *   *Result:* This note correctly associates ONLY with RxB ("Prefix BaseDrugNameX").
+
+        ii. **Add to Temporary Lists if Relevant:** If the `current_note` was found relevant to the `current_prescription` by *any* of the rules above (Rule 1, 2, OR 3):
+            *   If `current_note.noteTypeCd` is "BIL", add `{noteDate: current_note.noteDate, processedSummary: current_note.processedSummary}` to `current_rx_bil_notes`.
+            *   If `current_note.noteTypeCd` is "GEN", add `{noteDate: current_note.noteDate, processedSummary: current_note.processedSummary}` to `current_rx_gen_notes`.
+            *   **CRITICAL REMINDER:** A single note can be relevant to multiple prescriptions. This is REQUIRED if the note matches multiple Rx numbers (Rule 1), multiple exact drug names (Rule 2), OR if it matches *only* via Rule 3 (base name only, Pre-Check was NO) - in the Rule 3 case, it **MUST** be added to the temporary lists of **ALL** prescriptions for which Rule 3 was satisfied for that note.
+
+    c.  **Summarize BIL Notes for Current Rx (Aggregate by Date):**
+        i.   Group the notes in `current_rx_bil_notes` by `noteDate`.
+        ii.  Initialize an empty list: `bil_summary_objects = []`.
+        iii. **For each unique `noteDate` found in the grouped BIL notes:**
+            *   Collect *all* unique `processedSummary` values corresponding to this *single* `noteDate` from `current_rx_bil_notes`. (Avoid duplicates if the same note summary was added multiple times).
+            *   **Join the unique summaries for this date** into a single string using ". " as the separator.
+            *   Ensure the joined string ends with a period (add one if necessary, unless it already ends with punctuation like '.', '?', '!').
+            *   **Create ONLY ONE summary object** for this `noteDate`: `{ "noteDate": "MM/DD/YYYY", "summaryText": "MM/DD/YYYY: Joined Summaries." }`.
+            *   **Add this single, aggregated object to the `bil_summary_objects` list.**
+        iv.  Sort `bil_summary_objects` chronologically by `noteDate`. This list is the final `bilNotesSummary` for the `current_prescription`. (It will be `[]` if `current_rx_bil_notes` was empty).
+    d.  **Summarize GEN Notes for Current Rx (Aggregate by Date):**
+        i.   Perform the *exact same* grouping, collection of unique summaries, joining, single-object-creation-per-date, and sorting process on the `current_rx_gen_notes` list.
+        ii.  The resulting sorted list of aggregated objects is the final `genNotesSummary` for the `current_prescription`. (It will be `[]` if `current_rx_gen_notes` was empty).
+    e.  **Add to Final Results:** Create the final entry for the current prescription using its `rxNumber` (as `rxNumber`), `drugName` (as `drugName`), the generated `bilNotesSummary` (from 3c.iv), and the generated `genNotesSummary` (from 3d.ii). Add this entry to the `final_results` list.
+4.  **Output Final Result:** Output the complete `final_results` list as a JSON array.
+
+**CRITICAL LOGIC & SCHEMA ADHERENCE:**
+*   **Association Precision:** Ensure Step 3.b.i correctly distinguishes between exact `drugName` matches (Rule 2) and base `baseDrugName` matches (Rule 3), using *both* `processedSummary` and `noteTxt` for checks. The Rule 3 Pre-Check (Exclusion Condition) is crucial for preventing notes about specific formulations from wrongly associating via the base name. **Strict rule order (1 -> 2 -> 3) and the OVERALL GOAL statement are essential.**
+*   **Broad Base Name Association:** Ensure that if a note matches *only* via Rule 3 (mentions base name but *no* specific formulations sharing that base, i.e., Pre-Check is NO), it is correctly associated with **ALL** prescriptions sharing that base name.
+*   **Date Aggregation:** Step 3c and 3d MUST aggregate *all* unique summaries for a specific date into a *single* `DatedNoteSummary` object for that date. Do NOT create multiple objects for the same date within `bilNotesSummary` or `genNotesSummary`.
+*   **Correct Structure:** The final `bilNotesSummary` and `genNotesSummary` arrays MUST contain either `[]` (if no relevant notes) or an array of `DatedNoteSummary` objects (`{ "noteDate": "...", "summaryText": "..." }`). They MUST NOT contain simple strings or violate the one-object-per-date rule.
+*   **Completeness:** Ensure all prescriptions from the input are present in the output array.
+
+**Learning Example:** Analyze the Input/Output examples carefully. Note how a note mentioning only "HUMIRA" (base name) in `input1.json` correctly appears in the `genNotesSummary` for *multiple* different HUMIRA prescriptions in `output1.json`. Contrast this with how a note mentioning "RX#10210309" *only* appears for that specific Rx. With the refined logic, a note mentioning *only* "<BaseDrugNameX>" (base name) **must** appear under *both* "Specific Drug Formulation A" and "Specific Drug Formulation B" because it doesn't mention either specific formulation (Rule 3 Pre-Check is NO, Condition A is YES for both). However, a note mentioning "Specific Drug Formulation A" should *only* appear under that specific prescription (via Rule 2) and not under "Specific Drug Formulation B" (Rule 3 Pre-Check is YES, so Rule 3 fails). Similarly, a note mentioning "Prefix BaseDrugNameY" should *only* match "Prefix BaseDrugNameY" via Rule 2 and should *not* match "BaseDrugNameY 50mg Dose Kit" via Rule 3 (because the Pre-Check fails).
 
 **INPUT_data:**
+```json
 [
     {
-      "noteTxt": "PATIENT WANTS TO TALK TO MD REGARDING RX#10210309",
-      "noteSummaryTxt": "PATIENT WANTS TO TALK TO MD REGARDING RX#10210309",
-      "createDate": "03/25/2025 07:31:49 PM",
-      "noteId": "2147949351",
-      "noteTypeCd": "BIL",
-      "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
+        "noteTxt": "BOARD OF PHARMACY HAD TAKEN LEGAL ACTION FOR PAYOR OF NUPLAZID.",
+        "noteSummaryTxt": "BOARD OF PHARMACY HAD TAKEN LEGAL ACTION FOR PAYOR",
+        "createDate": "03/25/2025 01:35:07 PM",
+        "noteId": "2147949106",
+        "noteTypeCd": "BIL",
+        "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
     },
     {
-      "noteTxt": "NPS REPORTED FOR FEP PRESCRIPTIONS FOR HUMIRA",
-      "noteSummaryTxt": "NPS REPORTED FOR FEP PRESCRIPTIONS FOR HUMIRA",
-      "createDate": "03/21/2025 03:51:41 PM",
-      "noteId": "2147945703",
-      "noteTypeCd": "BIL",
-      "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
+        "noteTxt": "PATIENT EHR_IND TURNS TO Y DUE TO NUPLAZID 40MG.",
+        "noteSummaryTxt": "PATIENT EHR_IND TURNS TO Y DUE TO NUPLAZID 40MG.",
+        "createDate": "03/25/2025 01:32:10 PM",
+        "noteId": "2147949104",
+        "noteTypeCd": "BIL",
+        "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
     },
     {
-      "noteTxt": "TOPIC : INSURANCE CELL PHONE NUMBER : 4379883916\\u00a0 EMAIL ADDRESS : Anup.Kumar2@CVSHealth.com\\u00a0 TEXT SENT ON:03/21/2025 01:39:46 PM\\u00a0 AKUMAR4(EMP) Sent :\\u00a0 SMS TO PATIENT : Test\\u00a0 EMAIL TO PATIENT : test\\u00a0 EMAIL SUBJECT LINE : test\\u00a0 SECURE MESSAGE BEHIND LINK : Insurance team want to inform the update in the covergae for drug HUMIRA PEN (2/BOX) (ABB)\\u00a0 BrandIND:CVS OrgId:1 DivisionId:1 ClientCD:CVS LOBCode:00 CarrierId: AccountNo: GroupNo:",
-      "noteSummaryTxt": "<SM><INSURANCE(SM)>",
-      "createDate": "03/21/2025 03:39:46 PM",
-      "noteId": "2147945694",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "PATIENT BILLING TO A1 NUPLAZID.",
+        "noteSummaryTxt": " PATIENT BILLING TO A1 NUPLAZID.",
+        "createDate": "03/28/2025 01:33:10 PM",
+        "noteId": "2147949104",
+        "noteTypeCd": "BIL",
+        "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
     },
     {
-      "noteTxt": "MD CALLED FOR HUMIRA PEN (2/BOX) (ABB)",
-      "noteSummaryTxt": "MD CALLED FOR HUMIRA PEN (2/BOX) (ABB)",
-      "createDate": "03/21/2025 01:36:33 PM",
-      "noteId": "2147945570",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "NUPLAZID PRESCRPTION IS A KIND OF HEMO TYPE.",
+        "noteSummaryTxt": "NUPLAZID PRESCRPTION IS A KIND OF HEMO TYPE.",
+        "createDate": "03/25/2025 01:23:49 PM",
+        "noteId": "2147949095",
+        "noteTypeCd": "BIL",
+        "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
     },
     {
-      "noteTxt": "MD CALLED FOR HUMIRA",
-      "noteSummaryTxt": "MD CALLED FOR HUMIRA",
-      "createDate": "03/20/2025 05:34:53 PM",
-      "noteId": "2147944956",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "MANAGER CALLED RX# 10207950 IS AN EPC PRESCRIPTION.",
+        "noteSummaryTxt": "MANAGER CALLED RX# 10207950 IS AN EPC PRESCRIPTION",
+        "createDate": "03/25/2025 12:36:11 PM",
+        "noteId": "2147949046",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "noteTxt": "ADDED NOTES FOR HUMIRA",
-      "noteSummaryTxt": "ADDED NOTES FOR HUMIRA",
-      "createDate": "03/20/2025 10:48:33 AM",
-      "noteId": "2147944391",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "EHR TEAM CONNECTED FOR RX# 10207950 FOR PROCESSING THE RX.",
+        "noteSummaryTxt": "EHR TEAM CONNECTED FOR RX# 10207950 FOR PROCESSING",
+        "createDate": "03/25/2025 12:31:02 PM",
+        "noteId": "2147949044",
+        "noteTypeCd": "BIL",
+        "noteTypeInd": "BILLING/PRICING/PRIOR AUTH"
     },
     {
-      "noteTxt": "GEN NOTE ADDED FOR T6 HUMIRA",
-      "noteSummaryTxt": "GEN NOTE ADDED FOR T6 HUMIRA",
-      "createDate": "03/20/2025 12:21:52 AM",
-      "noteId": "2147944061",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "Received with for <NUPLAZID 10 MG> within SPRx Intake",
+        "noteSummaryTxt": "Received with for <NUPLAZID 10 MG> within SPRx Intake ",
+        "createDate": "02/18/2025 06:37:05 AM",
+        "noteId": "2147910671",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "noteTxt": "GEN NOTE ADDED FOR HUMIRA PEN(2/BOX) (ABB)",
-      "noteSummaryTxt": "GEN NOTE ADDED FOR HUMIRA PEN(2/BOX) (ABB)",
-      "createDate": "03/20/2025 12:21:11 AM",
-      "noteId": "2147944059",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "Received <8793279> with <RX> for <NUPLAZID 56 MG> within SPRx Intake. Doc(s) can be viewed within Pt SPRx Profile-Images",
+        "noteSummaryTxt": "Received <8793279> with <RX> for <NUPLAZID 56 MG> withi",
+        "createDate": "02/17/2025 06:37:05 AM",
+        "noteId": "2147910671",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "noteTxt": "GEN NOTE ADDED FOR HUMIRA 40 MG SYRINGE(2/BOX)",
-      "noteSummaryTxt": "GEN NOTE ADDED FOR HUMIRA 40 MG SYRINGE(2/BOX)",
-      "createDate": "03/20/2025 12:20:29 AM",
-      "noteId": "2147944058",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "MANAGER CALLED regarding F7 Spravato.",
+        "noteSummaryTxt": " MANAGER CALLED regarding F7 Spravato.",
+        "createDate": "03/25/2025 12:36:11 PM",
+        "noteId": "2147949046",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "noteTxt": "Received\\u00a0 with <RX> for <HUMIRA 20MG SYRINGE> within SPRx Intake.\\u00a0 Doc(s) can be viewed within Pt SPRx Profile-Images",
-      "noteSummaryTxt": "Received\\u00a0 with <RX> for <HUMIRA 20MG SYR",
-      "createDate": "03/19/2025 07:06:30 PM",
-      "noteId": "2147943900",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "Patient enrolled via < FAX > by < ORGB_002 >, Phone/Fax #: < >, < > for < NUPLAZID >. Method to obtain rx: < >. Referring MD: < USERONE AUTOMATION > < >.",
+        "noteSummaryTxt": "New Patient Enrollment",
+        "createDate": "02/17/2025 06:36:59 AM",
+        "noteId": "2147910666",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "noteTxt": "Patient enrolled via < CAREGIVER PHONE ENROLLMENT > by < QATST_R1 >, Phone/Fax #: <\\u00a0 >, <\\u00a0 > for < HUMIRA 20MG SYRINGE, TRUVADA >.\\u00a0 Method to obtain rx: <\\u00a0 >. Referring MD: <\\u00a0 \\u00a0> <\\u00a0 >.",
-      "noteSummaryTxt": "New Patient Enrollment",
-      "createDate": "03/19/2025 07:01:09 PM",
-      "noteId": "2147943894",
-      "noteTypeCd": "GEN",
-      "noteTypeInd": "GENERAL"
+        "noteTxt": "SPRAVATO is a good drug,can be taken for multiple disease.",
+        "noteSummaryTxt": "SPRAVATO is a good drug,can be taken for multiple disease.",
+        "createDate": "02/17/2025 06:37:05 AM",
+        "noteId": "2147910671",
+        "noteTypeCd": "GEN",
+        "noteTypeInd": "GENERAL"
     },
     {
-      "finalDisplayEntityId": "10210308-00",
-      "medicineName": "HUMIRA 40MG SYRINGE (2/BOX)"
+        "finalDisplayEntityId": "10208441-00",
+        "medicineName": "SPRAVATO 56MG DOSE KIT"
     },
     {
-      "finalDisplayEntityId": "10210310-00",
-      "medicineName": "HUMIRA PEN (2/BOX) (ABB)"
+        "finalDisplayEntityId": "10207950-00",
+        "medicineName": "NUPLAZID 56 MG"
     },
     {
-      "finalDisplayEntityId": "10210311-00",
-      "medicineName": "T6 HUMIRA"
+        "finalDisplayEntityId": "10208443-00",
+        "medicineName": "SPRAVATO 84MG DOSE KIT"
     },
     {
-      "finalDisplayEntityId": "10210309-00",
-      "medicineName": "HUMIRA PEN (2/BOX)"
+        "finalDisplayEntityId": "10208432-00",
+        "medicineName": "F7 SPRAVATO"
+    },
+    {
+        "finalDisplayEntityId": "10208478-00",
+        "medicineName": "A1 NUPLAZID"
     }
-  ]
+]
