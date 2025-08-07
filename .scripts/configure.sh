@@ -1,5 +1,6 @@
 # Usage: source .scripts/configure.sh
-
+git config --global user.email "aburdenko@yahoo.com"
+git config --global user.name "Alex Burdenko"
 
 # --- Virtual Environment Setup ---
 if [ ! -d ".venv/python3.12" ]; then
