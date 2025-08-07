@@ -2,12 +2,10 @@
 {
     // Specific configuration for an extension like "Run on Save" (by emeraldwalk)
     "emeraldwalk.runonsave": {
-
-
         "commands": [
             {
-                "match": "\\.prompt(\\.md)?$", // Regex: matches files ending in .prompt or .prompt.md
-                "cmd": ". ${workspaceFolder}/.scripts/configure.sh && rm -f ${fileBasename}.output.md && . ${workspaceFolder}/.venv/bin/activate && python3 ${workspaceFolder}/.scripts/run_gemini_from_file.py ${file}",                 
+                "match": ".*\\.prompt(\\.md)?$", // Match any file ending in .prompt or .prompt.md                
+                "cmd": ". ${workspaceFolder}/.scripts/configure.sh && rm -f ${fileBasename}.output.md && . ${workspaceFolder}/.venv/python3.12/bin/activate && .venv/python3.12/bin/python3 ${workspaceFolder}/.scripts/run_gemini_from_file.py ${file}",
                 "runIn": "terminal", // Runs in the integrated terminal
                 "runningStatusMessage": "Calling Gemini for ${fileBasename}...",
                 "finishStatusMessage": "${fileBasename} processed by Gemini."

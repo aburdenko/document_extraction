@@ -18,11 +18,11 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 # We need protos for schema definition and function calling
 import google.ai.generativelanguage as glm
 # *** FIX: Import the specific exception type ***
-import google.api_core.exceptions
+import google.api_core.exceptions as google_exceptions
 # --- End Add necessary imports ---
 
 # --- Constants ---
-DEFAULT_MODEL = "gemini-1.5-flash-latest" # Default model
+DEFAULT_MODEL = "gemini-2.5-flash" # Default model
 OUTPUT_SUFFIX = ".md.output.md"
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
@@ -364,6 +364,18 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
             try:
                 schema_dict = json.loads(schema_json_str)
                 logger.info("    JSON schema content parsed successfully.")
+                # --- FIX: Manually resolve the specific $ref in the schema ---
+                # The dict_to_proto_schema converter doesn't support $ref. We can resolve it here
+                # after parsing the JSON and before passing it to the converter.
+                try:
+                    # Define the object we are referencing
+                    ref_target = schema_dict["properties"]["prescriptions"]["items"]["properties"]["bilNotesSummary"]["items"]
+                    # Find the location of the reference and replace it with the actual object
+                    schema_dict["properties"]["prescriptions"]["items"]["properties"]["genNotesSummary"]["items"] = ref_target
+                    logger.info("    Manually resolved '$ref' for 'genNotesSummary.items'.")
+                except KeyError as e:
+                    logger.warning(f"    Could not manually resolve $ref, path not found in schema: {e}")
+                # --- END FIX ---
                 # Attempt conversion
                 proto_schema = dict_to_proto_schema(schema_dict) # Assign result here
                 if proto_schema:
@@ -760,7 +772,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
          output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
          output_filename.write_text(f"# Gemini Output for: {Path(prompt_filepath).name}\n\n---\n\nPROMPT BLOCKED\nReason: {e}")
     # *** FIX: Use the explicitly imported exception type ***
-    except google.api_core.exceptions.InvalidArgument as e:
+    except google_exceptions.InvalidArgument as e:
          logger.error(f"Error processing '{prompt_filepath}': Invalid Argument - {e}")
          logger.error("    This might be due to an invalid schema, function definition, model name, or other parameters.")
          output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
