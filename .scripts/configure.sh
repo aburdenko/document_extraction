@@ -70,6 +70,38 @@ fi
 echo "Activating environment './venv/python3.12'..."
  . .venv/python3.12/bin/activate
 
+# Ensure dependencies are installed/updated every time the script is sourced.
+# This prevents ModuleNotFoundError if requirements.txt changes after the
+# virtual environment has been created.
+echo "Ensuring dependencies from .scripts/requirements.txt are installed..."
+pip install -r .scripts/requirements.txt > /dev/null
+
+# --- Project Configuration ---
+# All project-wide configuration variables are set here.
+# These are used by the various Python scripts in this project.
+export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
+export REGION="us-central1"
+# Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
+# 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
+export GEMINI_MODEL_NAME="gemini-1.5-flash-latest"
+# 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
+export EMBEDDING_MODEL_NAME="text-embedding-004"
+export OUTPUT_SUFFIX=".md.output.md"
+
+# --- GitHub Mirroring Configuration ---
+export GITHUB_REPO_URL="https://github.com/hcls-solutions/rcm-agents/tree/main/test_data/"
+export GITHUB_REPO_BRANCH="main" # Default branch for the repository
+export GITHUB_TARGET_BUCKET="agentspace_hcls_demo" # IMPORTANT: Set a globally unique bucket name.
+export GITHUB_TOKEN="" # Optional: Your GitHub personal access token to increase API rate limits.
+
+# --- Vector Store Configuration ---
+# IMPORTANT: Bucket names must be globally unique.
+# Using your project ID in the bucket name is a good practice.
+export SOURCE_GCS_BUCKET="agentspace_hcls_demo"
+export STAGING_GCS_BUCKET="agentspace_hcls_demo"
+export INDEX_DISPLAY_NAME="agentspace_hcls_demo-store-index"
+export INDEX_ENDPOINT_DISPLAY_NAME="agentspace_hcls_demo-vector-store-endpoint"
+
 
 # --- Google Credentials Setup ---
 SERVICE_ACCOUNT_KEY_FILE="$HOME/service_account.json" # Path points to the user's home directory

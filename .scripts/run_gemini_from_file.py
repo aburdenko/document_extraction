@@ -22,8 +22,9 @@ import google.api_core.exceptions as google_exceptions
 # --- End Add necessary imports ---
 
 # --- Constants ---
-DEFAULT_MODEL = "gemini-2.5-flash" # Default model
-OUTPUT_SUFFIX = ".md.output.md"
+# Default model is now primarily set in .scripts/configure.sh as GEMINI_MODEL_NAME
+# A fallback is provided in the code where it's used.
+OUTPUT_SUFFIX = os.getenv('OUTPUT_SUFFIX', '.md.output.md') # Get from env var, with fallback
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
 # --- Define the key we expect for the schema section ---
@@ -467,7 +468,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         logger.info(f"    Function Declarations Provided: {'Yes' if proto_tool else 'No'}")
 
         # 3. Determine Model and Generation Config Parameters
-        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', DEFAULT_MODEL))
+        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         logger.info(f"    Using Model: {model_name}")
 
         generation_config_args: Dict[str, Any] = {}
