@@ -46,6 +46,10 @@ DEPLOYED_INDEX_ID_PREFIX = "vs_deployed"
 # --- Text Chunking Configuration ---
 CHUNK_SIZE = 2000  # Characters per chunk
 CHUNK_OVERLAP = 200 # Characters to overlap between chunks
+# --- Embedding API Configuration ---
+# The `text-embedding-004` model has a limit of 20,000 tokens per request.
+# We set a smaller batch size to ensure the total tokens in a batch do not exceed this limit.
+EMBEDDING_BATCH_SIZE = 20 # Number of text chunks to send in a single API call.
 
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -115,11 +119,12 @@ def generate_embeddings(
     """Generates embeddings for a list of text strings."""
     logger.info(f"Generating embeddings using model: {embedding_model_name}")
     model = TextEmbeddingModel.from_pretrained(embedding_model_name)
-    # The API supports batching of up to 250 texts per call.
+    # The API supports batching, but the total token count per request is limited.
+    # We use a smaller batch size to avoid exceeding the token limit.
     embeddings = []
-    for i in range(0, len(texts), 250):
-        batch = texts[i : i + 250]
-        logger.info(f"  - Embedding batch {i//250 + 1}...")
+    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
+        logger.info(f"  - Embedding batch {i//EMBEDDING_BATCH_SIZE + 1} of {len(texts)//EMBEDDING_BATCH_SIZE + 1}...")
         embeddings.extend([e.values for e in model.get_embeddings(batch)])
     logger.info(f"Successfully generated {len(embeddings)} embeddings.")
     return embeddings
