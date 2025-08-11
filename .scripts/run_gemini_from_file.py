@@ -14,7 +14,7 @@ from typing import Dict, Any, Tuple, Optional, List
 # --- SDK Imports ---
 # This script now uses the Vertex AI SDK for generation to support integrated RAG.
 import vertexai
-from vertexai.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting
+from vertexai.preview.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting, grounding
 
 # The following imports are for the manual RAG implementation, which is being replaced.
 # They are kept here for reference but are no longer used in the primary RAG path.
@@ -58,10 +58,10 @@ HARM_THRESHOLD_MAP: Dict[str, "HarmBlockThreshold"] = {
 }
 # Default safety settings if not specified in the file
 DEFAULT_SAFETY_SETTINGS: List[SafetySetting] = [
-    {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
-    {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
-    {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
-    {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
 ]
 # --- End Safety Settings ---
 
@@ -282,7 +282,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
         if not value_str:
             return None
 
-        settings: List[SafetySettingDict] = []
+        settings: List[SafetySetting] = []
         pairs = [item.strip() for item in value_str.split(',') if item.strip()]
         for pair in pairs:
             try:
@@ -445,6 +445,7 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
 def call_gemini_with_prompt_file(prompt_filepath: str):
     """Processes a single prompt file and calls the Gemini API."""
     try:
+        logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         filepath = Path(prompt_filepath)
         print(f"[{datetime.now()}] Processing prompt from: {filepath.name}") # Use print for top-level status
 
@@ -481,65 +482,70 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         # It creates a tool from the specified RAG corpus and passes it to the model.
         # The model then handles the retrieval and grounding automatically.
         rag_tool = None
-        rag_context_provided = False
         if rag_engine_endpoint:
             logger.info("--- RAG Engine Processing ---")
             try:
                 project_id = os.getenv("PROJECT_ID")
-                # Use a default region, but the lookup logic will use this as a starting point.
-                default_region = os.getenv("REGION", "us-central1")
-                if not project_id:
-                    raise ValueError("PROJECT_ID must be set for RAG Engine.")
+                region = os.getenv("REGION", "us-central1")
+                if not project_id or not region:
+                    raise ValueError("PROJECT_ID and REGION must be set for RAG Engine.")
 
                 # Initialize Vertex AI SDK (if not already done)
-                vertexai.init(project=project_id, location=default_region)
+                vertexai.init(project=project_id, location=region)
 
                 rag_source = None
                 rag_resource_string = rag_engine_endpoint.strip()
 
-                # Case 1: It's a RagCorpus resource name
+                # The RAG service now supports passing the corpus resource name directly
+                # Case 1: It's a full RagCorpus resource name
                 if "/ragCorpora/" in rag_resource_string:
                     logger.info(f"    Interpreting '{rag_resource_string}' as a RagCorpus resource name.")
-                    rag_source = vertexai.preview.rag.RagSource.from_corpus_name(rag_resource_string)
+                    rag_source = grounding.RagSource(rag_corpora=[rag_resource_string])
 
-                # Case 2: It's a Vector Search Index resource name
+                # Case 2: It's a full Vector Search Index resource name
                 elif "/indexes/" in rag_resource_string:
                     logger.info(f"    Interpreting '{rag_resource_string}' as a Vector Search Index resource name.")
-                    rag_source = vertexai.preview.rag.RagSource(vector_search_index=rag_resource_string)
+                    rag_source = grounding.RagSource(vector_search_index=rag_resource_string)
 
-                # Case 3: It's a display name for an Endpoint (most likely user scenario)
+                # Case 3: It's a display name for an Endpoint or Index
                 else:
-                    logger.info(f"    Interpreting '{rag_resource_string}' as a display name. Searching for a matching Vector Search Endpoint in region '{default_region}'...")
-                    aiplatform.init(project=project_id, location=default_region)
+                    logger.info(f"    Interpreting '{rag_resource_string}' as a display name. Searching for a matching Vector Search Endpoint in region '{region}'...")
+                    aiplatform.init(project=project_id, location=region)
                     endpoints = aiplatform.MatchingEngineIndexEndpoint.list(
-                        filter=f'display_name="{rag_resource_string}"',
-                        location=default_region
+                        filter=f'display_name="{rag_resource_string}"'
                     )
 
-                    if not endpoints:
-                        raise ValueError(f"Could not find a Vector Search Endpoint with display name '{rag_resource_string}' in region '{default_region}'. Check the region or use a full resource name.")
-
-                    endpoint = endpoints[0]
-                    if len(endpoints) > 1:
-                        logger.warning(f"    Found multiple endpoints with the same name. Using the first one: {endpoint.resource_name}")
-
-                    logger.info(f"    Found endpoint: {endpoint.resource_name}")
-
-                    if not endpoint.deployed_indexes:
-                        raise ValueError(f"Endpoint '{endpoint.resource_name}' has no deployed indexes.")
-
-                    index_resource_name = endpoint.deployed_indexes[0].index
-                    logger.info(f"    Using underlying index: {index_resource_name}")
-
-                    rag_source = vertexai.preview.rag.RagSource(vector_search_index=index_resource_name)
+                    if endpoints:
+                        endpoint = endpoints[0]
+                        if len(endpoints) > 1:
+                            logger.warning(f"    Found multiple endpoints with the same name. Using the first one: {endpoint.resource_name}")
+                        logger.info(f"    Found endpoint: {endpoint.resource_name}")
+                        if not endpoint.deployed_indexes:
+                            raise ValueError(f"Endpoint '{endpoint.resource_name}' has no deployed indexes.")
+                        index_resource_name = endpoint.deployed_indexes[0].index
+                        logger.info(f"    Using underlying index: {index_resource_name}")
+                        rag_source = grounding.RagSource(vector_search_index=index_resource_name)
+                    else:
+                        # If no endpoint is found, maybe it's an index display name
+                        logger.info(f"    No endpoint found. Searching for a matching Vector Search Index with display name '{rag_resource_string}'...")
+                        indexes = aiplatform.MatchingEngineIndex.list(
+                            filter=f'display_name="{rag_resource_string}"'
+                        )
+                        if indexes:
+                            index = indexes[0]
+                            if len(indexes) > 1:
+                                logger.warning(f"    Found multiple indexes with the same name. Using the first one: {index.resource_name}")
+                            logger.info(f"    Found index: {index.resource_name}")
+                            rag_source = grounding.RagSource(vector_search_index=index.resource_name)
+                        else:
+                             raise ValueError(f"Could not find a RagCorpus, Vector Search Endpoint, or Vector Search Index matching '{rag_resource_string}' in region '{region}'.")
 
                 if rag_source:
                     logger.info("    Creating RAG retrieval tool...")
                     retrieval = Tool.from_retrieval(
-                        vertexai.preview.rag.Retrieval(source=rag_source)
+                        grounding.Retrieval(source=rag_source)
                     )
                     rag_tool = retrieval
-                    rag_context_provided = True # We are providing the *tool*, so we consider context provided.
             except Exception as e:
                 logger.error(f"    Error during RAG processing: {e}", exc_info=True)
             logger.info("--- End RAG Engine Processing ---")
@@ -549,7 +555,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         logger.info(f"    Function Declarations Provided: {'Yes' if proto_tool else 'No'}")
 
         # 3. Determine Model and Generation Config Parameters
-        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-2.5-flash')) # Prioritizes metadata, then env var, then fallback
+        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         logger.info(f"    Using Model: {model_name}")
 
         generation_config_args: Dict[str, Any] = {}
@@ -673,6 +679,25 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
 
         # --- Process Response Content (Text or Function Call) ---
+        # Check for grounding metadata to display the retrieved context
+        try:
+            grounding_metadata = getattr(response.candidates[0], 'grounding_metadata', None)
+        except IndexError:
+            grounding_metadata = None # Handle cases with no candidates
+
+        if grounding_metadata and hasattr(grounding_metadata, 'retrieval_queries'):
+            retrieved_context = ""
+            for query in getattr(grounding_metadata, 'retrieval_queries', []):
+                for chunk in getattr(query, 'retrieved_chunks', []):
+                     # The source attribute contains the GCS URI
+                     source_uri = getattr(chunk, 'source', 'N/A')
+                     content = getattr(chunk, 'content', 'N/A')
+                     retrieved_context += f"Source: {source_uri}\n"
+                     retrieved_context += f"Content: {content}\n---\n"
+            if retrieved_context:
+                 output_content += f"## RAG CONTEXT\n\n"
+                 output_content += f"```text\n{retrieved_context}\n```\n\n"
+
         output_content += f"## RAW OUTPUT\n\n"
         function_call_requested = False
         response_text = ""
@@ -835,15 +860,26 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
         # --- 9. Save Final Output ---
         output_filename.write_text(output_content)
+        logger.info(f"--- Finished processing for {filepath.name} ---")
         print(f"    Output saved to: {output_filename}") # Use print for final status
 
     except FileNotFoundError:
         logger.error(f"Error processing '{prompt_filepath}': File not found.")
     except Exception as e:
-         logger.error(f"Error processing '{prompt_filepath}': Invalid Argument - {e}")
-         logger.error("    This might be due to an invalid schema, function definition, model name, or other parameters.")
-         output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
-        output_filename.write_text(f"# Gemini Output for: {Path(prompt_filepath).name}\n\n---\n\nPROCESSING ERROR\nType: {type(e).__name__}\nDetails: {e}")
+        # Enhanced error logging to provide a full traceback in the console
+        logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
+        output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
+        # Write a more informative error message to the output file
+        error_content = (
+            f"# Gemini Output for: {Path(prompt_filepath).name}\n\n"
+            f"---\n\n"
+            f"FATAL PROCESSING ERROR\n"
+            f"Type: {type(e).__name__}\n"
+            f"Details: {e}\n\n"
+            f"Please check the application logs for a full traceback."
+        )
+        output_filename.write_text(error_content)
+        logger.info(f"Error details saved to {output_filename}")
 
 
 def main():
@@ -873,7 +909,7 @@ def main():
                              "                  block_medium_and_above (or medium), block_only_high (or high)\n\n"
                              "Sections:\n"
                              "  # System Instructions: Optional instructions for the model.\n"
-                             "  # RagEngine: A RAG resource. Can be a RagCorpus resource name, a Vector Search Index resource name, or a Vector Search Endpoint display name.\n"
+                             "  # RagEngine: The display name of a Vertex AI Vector Search Index Endpoint to use for RAG.\n"
                              "  # Prompt: The main user prompt.\n"
                              "  # Controlled Output Schema: Optional JSON schema for structured output.\n"
                              "    - Presence triggers JSON mode *if* '# Functions' is not present.\n"
