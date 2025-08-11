@@ -14,7 +14,6 @@ Use the `--recreate` flag to force the deletion of an existing corpus and create
 import argparse
 import logging
 from google.api_core import exceptions as google_exceptions
-import os
 import sys
 
 import vertexai
@@ -31,6 +30,7 @@ logger = logging.getLogger(__name__)
 # --- Text Chunking Configuration ---
 CHUNK_SIZE = 1024  # Characters per chunk
 CHUNK_OVERLAP = 200 # Characters to overlap between chunks
+SUPPORTED_EXTENSIONS = ['.pdf', '.txt', '.csv', '.json', '.jsonl']
 
 
 def main(args):
@@ -80,36 +80,58 @@ def main(args):
         else:
             logger.info(f"Using existing corpus '{rag_corpus.name}' for file import.")
 
-        # 2. Import Files into Corpus
-        # Use a recursive wildcard (**) to find files in subdirectories.
-        gcs_uri_pattern = f"gs://{source_bucket}/**"
-        logger.info(f"Starting file import from '{gcs_uri_pattern}' into corpus '{rag_corpus.name}'...")
+        # 2. List and Filter Files
+        logger.info(f"Listing files in GCS bucket '{source_bucket}'...")
+        storage_client = storage.Client(project=project_id)
+        bucket = storage_client.bucket(source_bucket)
+        
+        supported_files = []
+        
+        # Iterate through all blobs (files) in the bucket
+        for blob in bucket.list_blobs(prefix=None):
+            if any(blob.name.lower().endswith(ext) for ext in SUPPORTED_EXTENSIONS):
+                supported_files.append(f"gs://{source_bucket}/{blob.name}")
+            else:
+                logger.info(f"Skipping unsupported file: {blob.name}")
+
+        if not supported_files:
+            logger.error(f"No supported files found in GCS bucket 'gs://{source_bucket}'. Supported types: {SUPPORTED_EXTENSIONS}")
+            sys.exit(1)
+            
+        logger.info(f"Found {len(supported_files)} supported files to import.")
+
+        # 3. Import Filtered Files into Corpus using batches
+        logger.info(f"Starting file import into corpus '{rag_corpus.name}'...")
         logger.info(f"Using embedding model: {embedding_model_name}")
         logger.info(f"Chunk size: {CHUNK_SIZE}, Chunk overlap: {CHUNK_OVERLAP}")
 
-        try:
-            response = rag.import_files(
-                rag_corpus.name,
-                [gcs_uri_pattern],
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-            )
-            logger.info(f"Import process started. Response: {response}")
-            logger.info("Processing can take a significant amount of time depending on the number and size of files.")
-            logger.info("You can monitor the status in the Google Cloud Console under Vertex AI -> RAG Engine.")
-            logger.info("---" * 10)
-            logger.info("✅ RAG Corpus processing initiated successfully!")
+        # The API supports up to 100 files per import request.
+        batch_size = 100
+        for i in range(0, len(supported_files), batch_size):
+            file_batch = supported_files[i:i + batch_size]
+            logger.info(f"Importing batch {int(i/batch_size) + 1} of {len(supported_files)} files...")
+            try:
+                response = rag.import_files(
+                    rag_corpus.name,
+                    file_batch,  # Pass the list of supported file URIs
+                    chunk_size=CHUNK_SIZE,
+                    chunk_overlap=CHUNK_OVERLAP,
+                )
+                logger.info(f"Import process for batch {int(i/batch_size) + 1} started. Response: {response}")
+            except google_exceptions.InvalidArgument as e:
+                logger.error(f"Failed to import a batch of files: {e}", exc_info=True)
+                sys.exit(1)
 
-            logger.info("---" * 10)
-            logger.info(f"   Your RAG Corpus Name is: {rag_corpus.name}")
-            logger.info("   Copy this full name (projects/...) and paste it into your prompt file under the '# RagEngine' section.")
-            logger.info("---" * 10)
-        except google_exceptions.NotFound:
-            logger.error(f"GCS Path Not Found: The specified path '{gcs_uri_pattern}' does not exist or is empty.")
-            logger.error("Please check that the bucket name is correct and that it contains files to be indexed.")
-            logger.error("You can check the bucket contents with the command: gsutil ls -r gs://<your-bucket-name>/**")
-            sys.exit(1)
+        logger.info("Processing can take a significant amount of time depending on the number and size of files.")
+        logger.info("You can monitor the status in the Google Cloud Console under Vertex AI -> RAG Engine.")
+        logger.info("---" * 10)
+        logger.info("✅ RAG Corpus processing initiated successfully!")
 
+        logger.info("---" * 10)
+        logger.info(f"   Your RAG Corpus Name is: {rag_corpus.name}")
+        logger.info("   Copy this full name (projects/...) and paste it into your prompt file under the '# RagEngine' section.")
+        logger.info("---" * 10)
+    
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
 
