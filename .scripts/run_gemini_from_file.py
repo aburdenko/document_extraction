@@ -15,6 +15,7 @@ from typing import Dict, Any, Tuple, Optional, List
 # This script now uses the Vertex AI SDK for generation to support integrated RAG.
 import vertexai
 from vertexai.preview.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting, grounding
+from vertexai.preview.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting, grounding
 
 # The following imports are for the manual RAG implementation, which is being replaced.
 # They are kept here for reference but are no longer used in the primary RAG path.
@@ -58,6 +59,10 @@ HARM_THRESHOLD_MAP: Dict[str, "HarmBlockThreshold"] = {
 }
 # Default safety settings if not specified in the file
 DEFAULT_SAFETY_SETTINGS: List[SafetySetting] = [
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
     SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
     SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
     SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
@@ -283,6 +288,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
             return None
 
         settings: List[SafetySetting] = []
+        settings: List[SafetySetting] = []
         pairs = [item.strip() for item in value_str.split(',') if item.strip()]
         for pair in pairs:
             try:
@@ -446,6 +452,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
     """Processes a single prompt file and calls the Gemini API."""
     try:
         logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
+        logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         filepath = Path(prompt_filepath)
         print(f"[{datetime.now()}] Processing prompt from: {filepath.name}") # Use print for top-level status
 
@@ -489,8 +496,12 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                 region = os.getenv("REGION", "us-central1")
                 if not project_id or not region:
                     raise ValueError("PROJECT_ID and REGION must be set for RAG Engine.")
+                region = os.getenv("REGION", "us-central1")
+                if not project_id or not region:
+                    raise ValueError("PROJECT_ID and REGION must be set for RAG Engine.")
 
                 # Initialize Vertex AI SDK (if not already done)
+                vertexai.init(project=project_id, location=region)
                 vertexai.init(project=project_id, location=region)
 
                 rag_source = None
@@ -555,6 +566,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         logger.info(f"    Function Declarations Provided: {'Yes' if proto_tool else 'No'}")
 
         # 3. Determine Model and Generation Config Parameters
+        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         logger.info(f"    Using Model: {model_name}")
 
@@ -679,6 +691,25 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
 
         # --- Process Response Content (Text or Function Call) ---
+        # Check for grounding metadata to display the retrieved context
+        try:
+            grounding_metadata = getattr(response.candidates[0], 'grounding_metadata', None)
+        except IndexError:
+            grounding_metadata = None # Handle cases with no candidates
+
+        if grounding_metadata and hasattr(grounding_metadata, 'retrieval_queries'):
+            retrieved_context = ""
+            for query in getattr(grounding_metadata, 'retrieval_queries', []):
+                for chunk in getattr(query, 'retrieved_chunks', []):
+                     # The source attribute contains the GCS URI
+                     source_uri = getattr(chunk, 'source', 'N/A')
+                     content = getattr(chunk, 'content', 'N/A')
+                     retrieved_context += f"Source: {source_uri}\n"
+                     retrieved_context += f"Content: {content}\n---\n"
+            if retrieved_context:
+                 output_content += f"## RAG CONTEXT\n\n"
+                 output_content += f"```text\n{retrieved_context}\n```\n\n"
+
         # Check for grounding metadata to display the retrieved context
         try:
             grounding_metadata = getattr(response.candidates[0], 'grounding_metadata', None)
@@ -861,11 +892,26 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         # --- 9. Save Final Output ---
         output_filename.write_text(output_content)
         logger.info(f"--- Finished processing for {filepath.name} ---")
+        logger.info(f"--- Finished processing for {filepath.name} ---")
         print(f"    Output saved to: {output_filename}") # Use print for final status
 
     except FileNotFoundError:
         logger.error(f"Error processing '{prompt_filepath}': File not found.")
     except Exception as e:
+        # Enhanced error logging to provide a full traceback in the console
+        logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
+        output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
+        # Write a more informative error message to the output file
+        error_content = (
+            f"# Gemini Output for: {Path(prompt_filepath).name}\n\n"
+            f"---\n\n"
+            f"FATAL PROCESSING ERROR\n"
+            f"Type: {type(e).__name__}\n"
+            f"Details: {e}\n\n"
+            f"Please check the application logs for a full traceback."
+        )
+        output_filename.write_text(error_content)
+        logger.info(f"Error details saved to {output_filename}")
         # Enhanced error logging to provide a full traceback in the console
         logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
         output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
@@ -909,6 +955,7 @@ def main():
                              "                  block_medium_and_above (or medium), block_only_high (or high)\n\n"
                              "Sections:\n"
                              "  # System Instructions: Optional instructions for the model.\n"
+                             "  # RagEngine: The display name of a Vertex AI Vector Search Index Endpoint to use for RAG.\n"
                              "  # RagEngine: The display name of a Vertex AI Vector Search Index Endpoint to use for RAG.\n"
                              "  # Prompt: The main user prompt.\n"
                              "  # Controlled Output Schema: Optional JSON schema for structured output.\n"
