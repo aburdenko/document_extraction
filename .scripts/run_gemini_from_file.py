@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Run with python3 ./.scripts/run_gemini_from_file.py suggested-prompt-2025-06-29.md
 
-import google.generativeai as genai
 import os
 import sys
 import argparse
@@ -12,13 +11,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 
-# --- Add necessary imports ---
-# Remove UsageMetadata from this line
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySettingDict, GenerateContentResponse
+# --- SDK Imports ---
+# This script now uses the Vertex AI SDK for generation to support integrated RAG.
+import vertexai
+from vertexai.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting
+
+# The following imports are for the manual RAG implementation, which is being replaced.
+# They are kept here for reference but are no longer used in the primary RAG path.
+from google.cloud import aiplatform
+from google.cloud import storage
+from vertexai.language_models import TextEmbeddingModel
 # We need protos for schema definition and function calling
 import google.ai.generativelanguage as glm
 # *** FIX: Import the specific exception type ***
-import google.api_core.exceptions as google_exceptions
 # --- End Add necessary imports ---
 
 # --- Constants ---
@@ -27,19 +32,20 @@ import google.api_core.exceptions as google_exceptions
 OUTPUT_SUFFIX = os.getenv('OUTPUT_SUFFIX', '.md.output.md') # Get from env var, with fallback
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
+RAG_ENGINE_SECTION_KEY = "ragengine"
 # --- Define the key we expect for the schema section ---
 CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
 
 # --- Safety Settings ---
 # Define mapping from string names (used in metadata) to HarmCategory enums
-HARM_CATEGORY_MAP: Dict[str, HarmCategory] = {
+HARM_CATEGORY_MAP: Dict[str, "HarmCategory"] = {
     "harassment": HarmCategory.HARM_CATEGORY_HARASSMENT,
     "hate_speech": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
     "sexually_explicit": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
     "dangerous_content": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
 }
 # Define mapping from string names (used in metadata) to HarmBlockThreshold enums
-HARM_THRESHOLD_MAP: Dict[str, HarmBlockThreshold] = {
+HARM_THRESHOLD_MAP: Dict[str, "HarmBlockThreshold"] = {
     "block_none": HarmBlockThreshold.BLOCK_NONE,
     "block_low_and_above": HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
     "block_medium_and_above": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -51,7 +57,7 @@ HARM_THRESHOLD_MAP: Dict[str, HarmBlockThreshold] = {
     "high": HarmBlockThreshold.BLOCK_ONLY_HIGH,
 }
 # Default safety settings if not specified in the file
-DEFAULT_SAFETY_SETTINGS: List[SafetySettingDict] = [
+DEFAULT_SAFETY_SETTINGS: List[SafetySetting] = [
     {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
     {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
     {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
@@ -270,7 +276,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
             return [item.strip() for item in value_str.split(',') if item.strip()]
         return None
 
-    def find_safety_settings(content: str) -> Optional[List[SafetySettingDict]]:
+    def find_safety_settings(content: str) -> Optional[List[SafetySetting]]:
         """Parses safety settings like 'Safety: harassment=none, hate_speech=low'"""
         value_str = find_value("Safety(?: Settings)?", content)
         if not value_str:
@@ -285,7 +291,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
                 threshold = HARM_THRESHOLD_MAP.get(threshold_str)
 
                 if category and threshold:
-                    settings.append({"category": category, "threshold": threshold})
+                    settings.append(SafetySetting(category=category, threshold=threshold))
                 else:
                     if not category:
                         logger.warning(f"    Invalid safety category '{category_str}' found in metadata. Skipping.")
@@ -318,16 +324,17 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
 
 # --- Modified parse_sections Function ---
 # *** FIX: Update return type hint ***
-def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], bool, Optional[glm.Tool], bool]:
+def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], bool, Optional[glm.Tool], bool, Optional[str]]:
     """
     Parses the text content into sections based on headings.
-    Checks for '# Controlled Output Schema' and '# Functions'.
+    Checks for '# Controlled Output Schema', '# Functions', and '# RagEngine'.
     Returns:
         - sections: Dictionary of section names to content.
         - proto_schema: Parsed proto schema from '# Controlled Output Schema' (or None if parsing fails).
         - controlled_output_section_found: Flag indicating if '# Controlled Output Schema' was found.
         - proto_tool: Parsed proto tool from '# Functions' (or None).
-        - functions_section_found: Flag indicating if '# Functions' was found. # *** FIX: Add this to docstring ***
+        - functions_section_found: Flag indicating if '# Functions' was found.
+        - rag_engine_endpoint: The display name of the Vector Search endpoint from '# RagEngine' section.
     """
     sections: Dict[str, str] = {}
     last_pos = 0
@@ -423,9 +430,15 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         else:
             logger.warning("    '# Functions' section is empty.")
 
+    # --- RAG Engine Extraction ---
+    rag_engine_endpoint = sections.get(RAG_ENGINE_SECTION_KEY)
+    if rag_engine_endpoint:
+        rag_engine_endpoint = rag_engine_endpoint.strip()
+        logger.info(f"    Found '# RagEngine' section. RAG resource specified: '{rag_engine_endpoint}'")
+
 
     # *** FIX: Return the functions_section_found boolean ***
-    return sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found
+    return sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint
 # --- End Modified parse_sections Function ---
 
 
@@ -443,7 +456,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
         # 2. Parse Sections, Schema, and Functions
         # *** FIX: Unpack the new return value ***
-        sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found = parse_sections(body)
+        sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint = parse_sections(body)
 
         system_instructions = sections.get("system_instructions")
         user_prompt = sections.get("prompt")
@@ -463,12 +476,80 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                  return
 
 
+        # --- RAG Engine Logic ---
+        # This new approach uses Vertex AI's integrated RAG.
+        # It creates a tool from the specified RAG corpus and passes it to the model.
+        # The model then handles the retrieval and grounding automatically.
+        rag_tool = None
+        rag_context_provided = False
+        if rag_engine_endpoint:
+            logger.info("--- RAG Engine Processing ---")
+            try:
+                project_id = os.getenv("PROJECT_ID")
+                # Use a default region, but the lookup logic will use this as a starting point.
+                default_region = os.getenv("REGION", "us-central1")
+                if not project_id:
+                    raise ValueError("PROJECT_ID must be set for RAG Engine.")
+
+                # Initialize Vertex AI SDK (if not already done)
+                vertexai.init(project=project_id, location=default_region)
+
+                rag_source = None
+                rag_resource_string = rag_engine_endpoint.strip()
+
+                # Case 1: It's a RagCorpus resource name
+                if "/ragCorpora/" in rag_resource_string:
+                    logger.info(f"    Interpreting '{rag_resource_string}' as a RagCorpus resource name.")
+                    rag_source = vertexai.preview.rag.RagSource.from_corpus_name(rag_resource_string)
+
+                # Case 2: It's a Vector Search Index resource name
+                elif "/indexes/" in rag_resource_string:
+                    logger.info(f"    Interpreting '{rag_resource_string}' as a Vector Search Index resource name.")
+                    rag_source = vertexai.preview.rag.RagSource(vector_search_index=rag_resource_string)
+
+                # Case 3: It's a display name for an Endpoint (most likely user scenario)
+                else:
+                    logger.info(f"    Interpreting '{rag_resource_string}' as a display name. Searching for a matching Vector Search Endpoint in region '{default_region}'...")
+                    aiplatform.init(project=project_id, location=default_region)
+                    endpoints = aiplatform.MatchingEngineIndexEndpoint.list(
+                        filter=f'display_name="{rag_resource_string}"',
+                        location=default_region
+                    )
+
+                    if not endpoints:
+                        raise ValueError(f"Could not find a Vector Search Endpoint with display name '{rag_resource_string}' in region '{default_region}'. Check the region or use a full resource name.")
+
+                    endpoint = endpoints[0]
+                    if len(endpoints) > 1:
+                        logger.warning(f"    Found multiple endpoints with the same name. Using the first one: {endpoint.resource_name}")
+
+                    logger.info(f"    Found endpoint: {endpoint.resource_name}")
+
+                    if not endpoint.deployed_indexes:
+                        raise ValueError(f"Endpoint '{endpoint.resource_name}' has no deployed indexes.")
+
+                    index_resource_name = endpoint.deployed_indexes[0].index
+                    logger.info(f"    Using underlying index: {index_resource_name}")
+
+                    rag_source = vertexai.preview.rag.RagSource(vector_search_index=index_resource_name)
+
+                if rag_source:
+                    logger.info("    Creating RAG retrieval tool...")
+                    retrieval = Tool.from_retrieval(
+                        vertexai.preview.rag.Retrieval(source=rag_source)
+                    )
+                    rag_tool = retrieval
+                    rag_context_provided = True # We are providing the *tool*, so we consider context provided.
+            except Exception as e:
+                logger.error(f"    Error during RAG processing: {e}", exc_info=True)
+            logger.info("--- End RAG Engine Processing ---")
+
         logger.info(f"    System Instructions Provided: {'Yes' if system_instructions else 'No'}")
         logger.info(f"    User Prompt (first 50 chars): '{user_prompt[:50]}...'")
         logger.info(f"    Function Declarations Provided: {'Yes' if proto_tool else 'No'}")
 
         # 3. Determine Model and Generation Config Parameters
-        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
+        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-2.5-flash')) # Prioritizes metadata, then env var, then fallback
         logger.info(f"    Using Model: {model_name}")
 
         generation_config_args: Dict[str, Any] = {}
@@ -513,36 +594,18 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         safety_settings = metadata.get('safety_settings', DEFAULT_SAFETY_SETTINGS)
         logger.info(f"    Using Safety Settings: {safety_settings}")
 
-
-        # 4. Configure API Key / Credentials (remains the same, uses logger)
-        api_key = os.getenv('GEMINI_API_KEY')
+        # 4. Configure Credentials
+        # The Vertex AI SDK primarily uses Application Default Credentials (ADC).
+        # The `vertexai.init()` call handles this. We'll check for the env var for logging.
         google_creds_env = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-
-        if api_key:
-            logger.info("    Using GEMINI_API_KEY.")
-            genai.configure(api_key=api_key)
-        elif google_creds_env:
+        if google_creds_env:
              logger.info(f"    Using GOOGLE_APPLICATION_CREDENTIALS: {google_creds_env}")
-             # Library handles automatically
         else:
-            try:
-                # Attempt Application Default Credentials (ADC)
-                # Import google.auth here, within the try block where it's needed
-                import google.auth
-                credentials, project_id = google.auth.default()
-                if not credentials:
-                     raise ValueError("No ADC credentials found")
-                logger.info("    Using Application Default Credentials (discovered).")
-            except Exception as e:
-                logger.error(f"    No GEMINI_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, or discoverable ADC found: {e}")
-                logger.error("    Please set credentials.")
-                output_filename = filepath.with_suffix(OUTPUT_SUFFIX)
-                output_filename.write_text(f"# Gemini Output for: {filepath.name}\n\n---\n\nCONFIGURATION ERROR\nDetails: Missing API credentials (API Key, GOOGLE_APPLICATION_CREDENTIALS, or ADC).")
-                return
+            logger.info("    Using Application Default Credentials (ADC) from the environment.")
 
 
         # 5. Prepare Model
-        model = genai.GenerativeModel(
+        model = GenerativeModel(
             model_name=model_name,
             system_instruction=system_instructions,
             safety_settings=safety_settings # Apply safety settings here
@@ -550,11 +613,17 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
         # 6. Call Gemini API (Primary Call)
         logger.info("    Calling Gemini API (Primary Call)...")
-        api_tools_arg = [proto_tool] if proto_tool else None # API expects a list of tools
-        response: GenerateContentResponse = model.generate_content(
+        # Combine function calling tools and the RAG tool
+        all_tools = []
+        if proto_tool:
+            all_tools.append(proto_tool)
+        if rag_tool:
+            all_tools.append(rag_tool)
+
+        response = model.generate_content(
             user_prompt,
             generation_config=generation_config,
-            tools=api_tools_arg
+            tools=all_tools if all_tools else None
             # Safety settings moved to model initialization
         )
         logger.info("    Primary API call complete.")
@@ -579,6 +648,8 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                   output_content += f"- **Stop Sequences:** {generation_config.stop_sequences}\n"
 
         # Reflect function/JSON mode status accurately
+        output_content += f"- **'# RagEngine' Section Found:** {'Yes' if rag_engine_endpoint else 'No'}\n"
+        output_content += f"- **RAG Tool Provided to Model:** {'Yes' if rag_tool else 'No'}\n"
         output_content += f"- **'# {CONTROLLED_OUTPUT_SECTION_KEY.replace('_', ' ').title()}' Section Found:** {'Yes' if controlled_output_section_found else 'No'}\n"
         # *** FIX: Use the correct variable here ***
         output_content += f"- **'# Functions' Section Found:** {'Yes' if functions_section_found else 'No'}\n"
@@ -768,20 +839,10 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
     except FileNotFoundError:
         logger.error(f"Error processing '{prompt_filepath}': File not found.")
-    except genai.types.generation_types.BlockedPromptException as e:
-         logger.error(f"Error processing '{prompt_filepath}': Prompt blocked by API. {e}")
-         output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
-         output_filename.write_text(f"# Gemini Output for: {Path(prompt_filepath).name}\n\n---\n\nPROMPT BLOCKED\nReason: {e}")
-    # *** FIX: Use the explicitly imported exception type ***
-    except google_exceptions.InvalidArgument as e:
+    except Exception as e:
          logger.error(f"Error processing '{prompt_filepath}': Invalid Argument - {e}")
          logger.error("    This might be due to an invalid schema, function definition, model name, or other parameters.")
          output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
-         output_filename.write_text(f"# Gemini Output for: {Path(prompt_filepath).name}\n\n---\n\nPROCESSING ERROR\nType: InvalidArgument\nDetails: {e}")
-    except Exception as e:
-        logger.exception(f"An unexpected error occurred while processing '{prompt_filepath}': {e}") # Log full traceback
-        # Save error details to the output file
-        output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
         output_filename.write_text(f"# Gemini Output for: {Path(prompt_filepath).name}\n\n---\n\nPROCESSING ERROR\nType: {type(e).__name__}\nDetails: {e}")
 
 
@@ -795,10 +856,11 @@ def main():
                         metavar="PROMPT_FILE",
                         type=str,
                         nargs='+',
-                        help="Path to one or more prompt files to process.\n"
+                        help="Path to one or more prompt files to process.\n\n"
                              "Prompt files can contain metadata lines (e.g., 'Model: model-name', 'Temperature: 0.5'),\n"
                              "and sections like '# System Instructions', '# Prompt', '# Controlled Output Schema', '# Functions'.\n\n"
                              "Supported Metadata:\n"
+                             "  # RagEngine: <rag_corpus_resource_name> (e.g., projects/.../ragCorpora/123...)\n"
                              "  Model: <model_name> (e.g., gemini-1.5-flash-latest)\n"
                              "  Temperature: <float> (e.g., 0.7)\n"
                              "  Top P: <float> (e.g., 0.95)\n"
@@ -811,6 +873,7 @@ def main():
                              "                  block_medium_and_above (or medium), block_only_high (or high)\n\n"
                              "Sections:\n"
                              "  # System Instructions: Optional instructions for the model.\n"
+                             "  # RagEngine: A RAG resource. Can be a RagCorpus resource name, a Vector Search Index resource name, or a Vector Search Endpoint display name.\n"
                              "  # Prompt: The main user prompt.\n"
                              "  # Controlled Output Schema: Optional JSON schema for structured output.\n"
                              "    - Presence triggers JSON mode *if* '# Functions' is not present.\n"
