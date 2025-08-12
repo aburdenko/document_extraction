@@ -14,17 +14,17 @@ from typing import Dict, Any, Tuple, Optional, List
 # --- SDK Imports ---
 # This script now uses the Vertex AI SDK for generation to support integrated RAG.
 import vertexai
-from vertexai.preview.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting, grounding
-from vertexai.preview.generative_models import GenerativeModel, Tool, Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting, grounding
+# The RAG features are in the 'preview' namespace.
+from vertexai.preview import rag
+from vertexai.preview.generative_models import GenerativeModel, Tool
+from vertexai.generative_models import Part, GenerationConfig, HarmCategory, HarmBlockThreshold, SafetySetting
 
-# The following imports are for the manual RAG implementation, which is being replaced.
 # They are kept here for reference but are no longer used in the primary RAG path.
 from google.cloud import aiplatform
 from google.cloud import storage
 from vertexai.language_models import TextEmbeddingModel
-# We need protos for schema definition and function calling
+# We need protos for schema definition and function calling.
 import google.ai.generativelanguage as glm
-# *** FIX: Import the specific exception type ***
 # --- End Add necessary imports ---
 
 # --- Constants ---
@@ -284,7 +284,6 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
             return None
 
         settings: List[SafetySetting] = []
-        settings: List[SafetySetting] = []
         pairs = [item.strip() for item in value_str.split(',') if item.strip()]
         for pair in pairs:
             try:
@@ -325,7 +324,6 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
 
 
 # --- Modified parse_sections Function ---
-# *** FIX: Update return type hint ***
 def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], bool, Optional[glm.Tool], bool, Optional[str]]:
     """
     Parses the text content into sections based on headings.
@@ -374,7 +372,7 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
             try:
                 schema_dict = json.loads(schema_json_str)
                 logger.info("    JSON schema content parsed successfully.")
-                # --- FIX: Manually resolve the specific $ref in the schema ---
+                # --- Manually resolve the specific $ref in the schema ---
                 # The dict_to_proto_schema converter doesn't support $ref. We can resolve it here
                 # after parsing the JSON and before passing it to the converter.
                 try:
@@ -405,7 +403,6 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
 
     # --- Function Declaration Extraction ---
     proto_tool = None
-    # *** FIX: Store the result of the check ***
     functions_section_found = 'functions' in sections # This key is derived from "# Functions"
 
     if functions_section_found:
@@ -439,7 +436,6 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         logger.info(f"    Found '# RagEngine' section. RAG resource specified: '{rag_engine_endpoint}'")
 
 
-    # *** FIX: Return the functions_section_found boolean ***
     return sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint
 # --- End Modified parse_sections Function ---
 
@@ -447,7 +443,6 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
 def call_gemini_with_prompt_file(prompt_filepath: str):
     """Processes a single prompt file and calls the Gemini API."""
     try:
-        logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         filepath = Path(prompt_filepath)
         print(f"[{datetime.now()}] Processing prompt from: {filepath.name}") # Use print for top-level status
@@ -459,7 +454,6 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         logger.info(f"    Parsed Metadata: {metadata}")
 
         # 2. Parse Sections, Schema, and Functions
-        # *** FIX: Unpack the new return value ***
         sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint = parse_sections(body)
 
         system_instructions = sections.get("system_instructions")
@@ -492,27 +486,47 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                 region = os.getenv("REGION", "us-central1")
                 if not project_id or not region:
                     raise ValueError("PROJECT_ID and REGION must be set for RAG Engine.")
-                region = os.getenv("REGION", "us-central1")
-                if not project_id or not region:
-                    raise ValueError("PROJECT_ID and REGION must be set for RAG Engine.")
 
                 # Initialize Vertex AI SDK (if not already done)
                 vertexai.init(project=project_id, location=region)
-                vertexai.init(project=project_id, location=region)
 
-                rag_source = None
+                # Use the same model for the LLM Ranker as the main model for consistency
+                model_name_for_rag = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest'))
+                logger.info(f"    Configuring RAG with LLM Ranker using model: {model_name_for_rag}")
+                rag_retrieval_config = rag.RagRetrievalConfig(
+                    top_k=10, # A sensible default
+                    ranking=rag.Ranking(
+                        llm_ranker=rag.LlmRanker(
+                            model_name=model_name_for_rag
+                        )
+                    )
+                )
+
                 rag_resource_string = rag_engine_endpoint.strip()
+                rag_store = None
 
-                # The RAG service now supports passing the corpus resource name directly
+                # The new RAG API uses a single source type: VertexRagStore
+                # which can point to either a corpus or a vector search index.
+                
                 # Case 1: It's a full RagCorpus resource name
-                if "/ragCorpora/" in rag_resource_string:
+                if "/ragCorpora/" in rag_resource_string or "/corpora/" in rag_resource_string:
                     logger.info(f"    Interpreting '{rag_resource_string}' as a RagCorpus resource name.")
-                    rag_source = grounding.RagSource(rag_corpora=[rag_resource_string])
-
+                    rag_store = rag.VertexRagStore(
+                        rag_resources=[
+                            rag.RagResource(
+                                rag_corpus=rag_resource_string,
+                            )
+                        ],
+                        rag_retrieval_config=rag_retrieval_config
+                    )
+                
                 # Case 2: It's a full Vector Search Index resource name
                 elif "/indexes/" in rag_resource_string:
                     logger.info(f"    Interpreting '{rag_resource_string}' as a Vector Search Index resource name.")
-                    rag_source = grounding.RagSource(vector_search_index=rag_resource_string)
+                    rag_store = rag.VertexRagStore(
+                        vector_search_index=rag_resource_string,
+                        rag_retrieval_config=rag_retrieval_config
+                    )
 
                 # Case 3: It's a display name for an Endpoint or Index
                 else:
@@ -531,7 +545,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                             raise ValueError(f"Endpoint '{endpoint.resource_name}' has no deployed indexes.")
                         index_resource_name = endpoint.deployed_indexes[0].index
                         logger.info(f"    Using underlying index: {index_resource_name}")
-                        rag_source = grounding.RagSource(vector_search_index=index_resource_name)
+                        rag_store = rag.VertexRagStore(vector_search_index=index_resource_name, rag_retrieval_config=rag_retrieval_config)
                     else:
                         # If no endpoint is found, maybe it's an index display name
                         logger.info(f"    No endpoint found. Searching for a matching Vector Search Index with display name '{rag_resource_string}'...")
@@ -543,26 +557,28 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                             if len(indexes) > 1:
                                 logger.warning(f"    Found multiple indexes with the same name. Using the first one: {index.resource_name}")
                             logger.info(f"    Found index: {index.resource_name}")
-                            rag_source = grounding.RagSource(vector_search_index=index.resource_name)
+                            rag_store = rag.VertexRagStore(vector_search_index=index.resource_name, rag_retrieval_config=rag_retrieval_config)
                         else:
                              raise ValueError(f"Could not find a RagCorpus, Vector Search Endpoint, or Vector Search Index matching '{rag_resource_string}' in region '{region}'.")
 
-                if rag_source:
+                if rag_store:
                     logger.info("    Creating RAG retrieval tool...")
-                    retrieval = Tool.from_retrieval(
-                        grounding.Retrieval(source=rag_source)
-                    )
-                    rag_tool = retrieval
+                    # The new API uses Tool.from_retrieval with rag.Retrieval
+                    retrieval = rag.Retrieval(source=rag_store)
+                    rag_tool = Tool.from_retrieval(retrieval)
             except Exception as e:
                 logger.error(f"    Error during RAG processing: {e}", exc_info=True)
             logger.info("--- End RAG Engine Processing ---")
-
+        
+        
+        
         logger.info(f"    System Instructions Provided: {'Yes' if system_instructions else 'No'}")
         logger.info(f"    User Prompt (first 50 chars): '{user_prompt[:50]}...'")
         logger.info(f"    Function Declarations Provided: {'Yes' if proto_tool else 'No'}")
+        logger.info(f"    Rag Tool Provided: {bool(rag_tool)}")
+        
 
         # 3. Determine Model and Generation Config Parameters
-        model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         model_name = metadata.get('model_name', os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')) # Prioritizes metadata, then env var, then fallback
         logger.info(f"    Using Model: {model_name}")
 
@@ -665,7 +681,6 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         output_content += f"- **'# RagEngine' Section Found:** {'Yes' if rag_engine_endpoint else 'No'}\n"
         output_content += f"- **RAG Tool Provided to Model:** {'Yes' if rag_tool else 'No'}\n"
         output_content += f"- **'# {CONTROLLED_OUTPUT_SECTION_KEY.replace('_', ' ').title()}' Section Found:** {'Yes' if controlled_output_section_found else 'No'}\n"
-        # *** FIX: Use the correct variable here ***
         output_content += f"- **'# Functions' Section Found:** {'Yes' if functions_section_found else 'No'}\n"
         output_content += f"- **Function Calling Active (Tools Provided):** {'Yes' if proto_tool else 'No'}\n"
         output_content += f"- **JSON Output Mode Active (MIME Type):** {activate_json_mode}\n"
@@ -687,25 +702,6 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
 
         # --- Process Response Content (Text or Function Call) ---
-        # Check for grounding metadata to display the retrieved context
-        try:
-            grounding_metadata = getattr(response.candidates[0], 'grounding_metadata', None)
-        except IndexError:
-            grounding_metadata = None # Handle cases with no candidates
-
-        if grounding_metadata and hasattr(grounding_metadata, 'retrieval_queries'):
-            retrieved_context = ""
-            for query in getattr(grounding_metadata, 'retrieval_queries', []):
-                for chunk in getattr(query, 'retrieved_chunks', []):
-                     # The source attribute contains the GCS URI
-                     source_uri = getattr(chunk, 'source', 'N/A')
-                     content = getattr(chunk, 'content', 'N/A')
-                     retrieved_context += f"Source: {source_uri}\n"
-                     retrieved_context += f"Content: {content}\n---\n"
-            if retrieved_context:
-                 output_content += f"## RAG CONTEXT\n\n"
-                 output_content += f"```text\n{retrieved_context}\n```\n\n"
-
         # Check for grounding metadata to display the retrieved context
         try:
             grounding_metadata = getattr(response.candidates[0], 'grounding_metadata', None)
@@ -859,7 +855,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                     f"Please explain this JSON data in a clear, human-readable format. Focus on the meaning, structure, and key information contained within it, considering the constraints imposed by the original schema.\n\n"
                     f"```json\n{raw_json_output_for_explanation}\n```"
                 )
-                explanation_response: GenerateContentResponse = model.generate_content(
+                explanation_response = model.generate_content(
                     explanation_prompt
                     # Use default safety settings from the model
                     # Use default generation config (no temp, top_k etc specified here)
@@ -888,7 +884,6 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         # --- 9. Save Final Output ---
         output_filename.write_text(output_content)
         logger.info(f"--- Finished processing for {filepath.name} ---")
-        logger.info(f"--- Finished processing for {filepath.name} ---")
         print(f"    Output saved to: {output_filename}") # Use print for final status
 
     except FileNotFoundError:
@@ -908,7 +903,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         )
         output_filename.write_text(error_content)
         logger.info(f"Error details saved to {output_filename}")
-        # Enhanced error logging to provide a full traceback in the console
+         # Enhanced error logging to provide a full traceback in the console
         logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
         output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
         # Write a more informative error message to the output file
@@ -951,8 +946,7 @@ def main():
                              "                  block_medium_and_above (or medium), block_only_high (or high)\n\n"
                              "Sections:\n"
                              "  # System Instructions: Optional instructions for the model.\n"
-                             "  # RagEngine: The display name of a Vertex AI Vector Search Index Endpoint to use for RAG.\n"
-                             "  # RagEngine: The display name of a Vertex AI Vector Search Index Endpoint to use for RAG.\n"
+                             "  # RagEngine: The resource name or display name of a Vertex AI RAG Corpus or Vector Search Index/Endpoint to use for RAG.\n"
                              "  # Prompt: The main user prompt.\n"
                              "  # Controlled Output Schema: Optional JSON schema for structured output.\n"
                              "    - Presence triggers JSON mode *if* '# Functions' is not present.\n"
