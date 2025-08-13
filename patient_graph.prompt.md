@@ -3,6 +3,10 @@ You are an expert in clinical data processing and FHIR (Fast Healthcare Interope
 
 Your task is to analyze the provided clinical text for a single patient and transform it into a structured JSON graph representation. The output must be a single, valid JSON object.
 
+# Metadata
+Temperature: 0
+
+
 The JSON graph must have two top-level keys: "nodes" and "edges".
 
 **Node Creation Rules:**

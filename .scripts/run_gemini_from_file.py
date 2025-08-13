@@ -326,6 +326,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
     metadata_dict['temperature'] = find_float(r"Temperature", file_content)
     metadata_dict['top_p'] = find_float(r"Top P", file_content)
     metadata_dict['top_k'] = find_int(r"Top K", file_content)
+    metadata_dict['seed'] = find_int(r"Seed", file_content)
     metadata_dict['max_output_tokens'] = find_int(r"Max(?: Output)? Tokens", file_content)
     metadata_dict['stop_sequences'] = find_string_list(r"Stop Sequences", file_content)
     metadata_dict['safety_settings'] = find_safety_settings(file_content)
@@ -597,6 +598,9 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         if 'top_k' in metadata:
             generation_config_args['top_k'] = metadata['top_k']
             logger.info(f"    Top K: {metadata['top_k']}")
+        if 'seed' in metadata:
+            generation_config_args['seed'] = metadata['seed']
+            logger.info(f"    Seed: {metadata['seed']}")
         if 'max_output_tokens' in metadata:
             generation_config_args['max_output_tokens'] = metadata['max_output_tokens']
             logger.info(f"    Max Output Tokens: {metadata['max_output_tokens']}")
@@ -678,6 +682,8 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                   output_content += f"- **Top P:** {generation_config_args['top_p']}\n"
              if 'top_k' in generation_config_args:
                   output_content += f"- **Top K:** {generation_config_args['top_k']}\n"
+             if 'seed' in generation_config_args:
+                  output_content += f"- **Seed:** {generation_config_args['seed']}\n"
              if 'max_output_tokens' in generation_config_args:
                   output_content += f"- **Max Output Tokens:** {generation_config_args['max_output_tokens']}\n"
              if 'stop_sequences' in generation_config_args:
