@@ -83,10 +83,10 @@ export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
 export REGION="us-central1"
 # Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
 # 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
-export GEMINI_MODEL_NAME="gemini-2.5-flash"
+export GEMINI_MODEL_NAME="gemini-2.5-pro"
+#export GEMINI_MODEL_NAME="gemini-2.5-flash"
 # 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
 export EMBEDDING_MODEL_NAME="text-embedding-004"
-export OUTPUT_SUFFIX=".md.output.md"
 
 # --- GitHub Mirroring Configuration ---
 export GITHUB_REPO_URL="https://github.com/hcls-solutions/rcm-agents/tree/main/test_data/"

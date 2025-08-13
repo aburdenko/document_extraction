@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import Dict, Any, Tuple, Optional, List
 
 # --- SDK Imports ---
@@ -30,12 +31,23 @@ import google.ai.generativelanguage as glm
 # --- Constants ---
 # Default model is now primarily set in .scripts/configure.sh as GEMINI_MODEL_NAME
 # A fallback is provided in the code where it's used.
-OUTPUT_SUFFIX = os.getenv('OUTPUT_SUFFIX', '.md.output.md') # Get from env var, with fallback
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
 RAG_ENGINE_SECTION_KEY = "ragengine"
 # --- Define the key we expect for the schema section ---
 CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
+
+# --- Model Pricing (per 1,000 tokens) ---
+# Prices as of mid-2024 from https://cloud.google.com/vertex-ai/generative-ai/pricing
+MODEL_PRICING = {
+    # Gemini 2.5 Models
+    "gemini-2.5-flash": {"input": 0.00030, "output": 0.001},
+    "gemini-2.5-flash-latest": {"input": 0.00030, "output": 0.001},
+    "gemini-2.5-pro": {"input": 0.00125, "output": 0.01},
+    "gemini-2.5-pro-latest": {"input": 0.00125, "output": 0.01},
+    # Add other models here as they are used.
+}
+# --- End Model Pricing ---
 
 # --- Safety Settings ---
 # Define mapping from string names (used in metadata) to HarmCategory enums
@@ -111,16 +123,18 @@ def dict_to_proto_schema(schema_dict: dict) -> Optional[glm.Schema]:
 
             prop = glm.Schema(
                 description=prop_details.get("description", ""),
-                nullable=prop_details.get("nullable", False)
                 # title is not directly mapped in glm.Schema for properties
             )
+            # Set nullable attribute only if it exists, for backward compatibility with older SDKs
+            if hasattr(prop, 'nullable'):
+                prop.nullable = prop_details.get("nullable", False)
 
             prop.type = TYPE_MAP.get(prop_type_str, glm.Type.STRING) # Default to STRING
 
             if prop.type == glm.Type.STRING:
                 enum = prop_details.get("enum")
                 if enum and isinstance(enum, list): # Ensure enum is a list
-                    prop.enum.values.extend([str(e) for e in enum]) # Ensure values are strings
+                    prop.enum.extend([str(e) for e in enum]) # Ensure values are strings
                 # pattern is not directly mapped in glm.Schema
 
             elif prop.type == glm.Type.ARRAY:
@@ -324,13 +338,14 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
 
 
 # --- Modified parse_sections Function ---
-def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], bool, Optional[glm.Tool], bool, Optional[str]]:
+def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], Optional[Dict[str, Any]], bool, Optional[glm.Tool], bool, Optional[str]]:
     """
     Parses the text content into sections based on headings.
     Checks for '# Controlled Output Schema', '# Functions', and '# RagEngine'.
     Returns:
         - sections: Dictionary of section names to content.
         - proto_schema: Parsed proto schema from '# Controlled Output Schema' (or None if parsing fails).
+        - schema_dict: The raw parsed dictionary of the schema (or None).
         - controlled_output_section_found: Flag indicating if '# Controlled Output Schema' was found.
         - proto_tool: Parsed proto tool from '# Functions' (or None).
         - functions_section_found: Flag indicating if '# Functions' was found.
@@ -372,18 +387,6 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
             try:
                 schema_dict = json.loads(schema_json_str)
                 logger.info("    JSON schema content parsed successfully.")
-                # --- Manually resolve the specific $ref in the schema ---
-                # The dict_to_proto_schema converter doesn't support $ref. We can resolve it here
-                # after parsing the JSON and before passing it to the converter.
-                try:
-                    # Define the object we are referencing
-                    ref_target = schema_dict["properties"]["prescriptions"]["items"]["properties"]["bilNotesSummary"]["items"]
-                    # Find the location of the reference and replace it with the actual object
-                    schema_dict["properties"]["prescriptions"]["items"]["properties"]["genNotesSummary"]["items"] = ref_target
-                    logger.info("    Manually resolved '$ref' for 'genNotesSummary.items'.")
-                except KeyError as e:
-                    logger.warning(f"    Could not manually resolve $ref, path not found in schema: {e}")
-                # --- END FIX ---
                 # Attempt conversion
                 proto_schema = dict_to_proto_schema(schema_dict) # Assign result here
                 if proto_schema:
@@ -436,13 +439,14 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         logger.info(f"    Found '# RagEngine' section. RAG resource specified: '{rag_engine_endpoint}'")
 
 
-    return sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint
+    return sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint
 # --- End Modified parse_sections Function ---
 
 
 def call_gemini_with_prompt_file(prompt_filepath: str):
     """Processes a single prompt file and calls the Gemini API."""
     try:
+        total_cost = 0.0 # Initialize total cost
         logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         filepath = Path(prompt_filepath)
         print(f"[{datetime.now()}] Processing prompt from: {filepath.name}") # Use print for top-level status
@@ -454,7 +458,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         logger.info(f"    Parsed Metadata: {metadata}")
 
         # 2. Parse Sections, Schema, and Functions
-        sections, proto_schema, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint = parse_sections(body)
+        sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint = parse_sections(body)
 
         system_instructions = sections.get("system_instructions")
         user_prompt = sections.get("prompt")
@@ -469,7 +473,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                  user_prompt = sections.get('initial_content')
             else:
                  logger.error("    Could not find a '# Prompt' section or suitable fallback content.")
-                 output_filename = filepath.with_suffix(OUTPUT_SUFFIX)
+                 output_filename = filepath.with_name(f"{filepath.stem}.{model_name}.output.md")
                  output_filename.write_text(f"# Gemini Output for: {filepath.name}\n\n---\n\nPROCESSING ERROR\nDetails: No '# Prompt' section found and no fallback content available.")
                  return
 
@@ -613,7 +617,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
             # Check if proto_schema is a valid object (not None)
             if proto_schema:
                 logger.info("    Applying parsed schema to generation config.")
-                generation_config_args['response_schema'] = proto_schema
+                generation_config_args['response_schema'] = schema_dict
             else:
                 # This log indicates why the schema wasn't applied
                 logger.warning("    JSON mode activated, but no valid schema was parsed/converted. Requesting generic JSON.")
@@ -650,32 +654,34 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         if rag_tool:
             all_tools.append(rag_tool)
 
+        start_time_primary = time.monotonic()
         response = model.generate_content(
             user_prompt,
             generation_config=generation_config,
             tools=all_tools if all_tools else None
             # Safety settings moved to model initialization
         )
-        logger.info("    Primary API call complete.")
+        duration_primary = time.monotonic() - start_time_primary
+        logger.info(f"    Primary API call complete in {duration_primary:.2f} seconds.")
 
         # 7. Process and Prepare Output Content
-        output_filename = filepath.with_suffix(OUTPUT_SUFFIX)
+        output_filename = filepath.with_name(f"{filepath.stem}.{model_name}.output.md")
         output_content = f"# Gemini Output for: {filepath.name}\n"
         output_content += f"## Request Configuration\n"
         output_content += f"- **Model:** {model_name}\n"
         output_content += f"- **System Instructions Provided:** {'Yes' if system_instructions else 'No'}\n"
         # Add details from generation config if used
-        if generation_config:
-             if generation_config.temperature is not None:
-                  output_content += f"- **Temperature:** {generation_config.temperature}\n"
-             if generation_config.top_p is not None:
-                  output_content += f"- **Top P:** {generation_config.top_p}\n"
-             if generation_config.top_k is not None:
-                  output_content += f"- **Top K:** {generation_config.top_k}\n"
-             if generation_config.max_output_tokens is not None:
-                  output_content += f"- **Max Output Tokens:** {generation_config.max_output_tokens}\n"
-             if generation_config.stop_sequences:
-                  output_content += f"- **Stop Sequences:** {generation_config.stop_sequences}\n"
+        if generation_config_args:
+             if 'temperature' in generation_config_args:
+                  output_content += f"- **Temperature:** {generation_config_args['temperature']}\n"
+             if 'top_p' in generation_config_args:
+                  output_content += f"- **Top P:** {generation_config_args['top_p']}\n"
+             if 'top_k' in generation_config_args:
+                  output_content += f"- **Top K:** {generation_config_args['top_k']}\n"
+             if 'max_output_tokens' in generation_config_args:
+                  output_content += f"- **Max Output Tokens:** {generation_config_args['max_output_tokens']}\n"
+             if 'stop_sequences' in generation_config_args:
+                  output_content += f"- **Stop Sequences:** {generation_config_args['stop_sequences']}\n"
 
         # Reflect function/JSON mode status accurately
         output_content += f"- **'# RagEngine' Section Found:** {'Yes' if rag_engine_endpoint else 'No'}\n"
@@ -695,10 +701,27 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         usage_metadata = getattr(response, 'usage_metadata', None)
         if usage_metadata:
             output_content += f"## Usage Metadata (Primary Call)\n"
-            output_content += f"- **Prompt Token Count:** {getattr(usage_metadata, 'prompt_token_count', 'N/A')}\n"
-            output_content += f"- **Candidates Token Count:** {getattr(usage_metadata, 'candidates_token_count', 'N/A')}\n"
-            # Function call usage might be counted differently or included here
-            output_content += f"- **Total Token Count:** {getattr(usage_metadata, 'total_token_count', 'N/A')}\n\n"
+            prompt_tokens = getattr(usage_metadata, 'prompt_token_count', 0)
+            candidates_tokens = getattr(usage_metadata, 'candidates_token_count', 0)
+            total_tokens = getattr(usage_metadata, 'total_token_count', 0)
+
+            output_content += f"- **Prompt Token Count:** {prompt_tokens}\n"
+            output_content += f"- **Candidates Token Count:** {candidates_tokens}\n"
+            output_content += f"- **Total Token Count:** {total_tokens}\n"
+            output_content += f"- **Time Taken:** {duration_primary:.2f} seconds\n"
+
+            # Calculate cost for the primary call
+            prices = MODEL_PRICING.get(model_name, MODEL_PRICING.get(model_name.replace('-latest', ''), {}))
+            if prices:
+                input_cost = (prompt_tokens / 1000) * prices.get("input", 0)
+                output_cost = (candidates_tokens / 1000) * prices.get("output", 0)
+                call_cost = input_cost + output_cost
+                total_cost += call_cost
+                output_content += f"- **Estimated Cost:** ${call_cost:.6f}\n"
+            else:
+                logger.warning(f"    Pricing not found for model '{model_name}'. Cost will not be estimated for this call.")
+
+            output_content += "\n"
 
 
         # --- Process Response Content (Text or Function Call) ---
@@ -855,22 +878,38 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                     f"Please explain this JSON data in a clear, human-readable format. Focus on the meaning, structure, and key information contained within it, considering the constraints imposed by the original schema.\n\n"
                     f"```json\n{raw_json_output_for_explanation}\n```"
                 )
+                start_time_explanation = time.monotonic()
                 explanation_response = model.generate_content(
                     explanation_prompt
                     # Use default safety settings from the model
                     # Use default generation config (no temp, top_k etc specified here)
                 )
+                duration_explanation = time.monotonic() - start_time_explanation
                 explanation_text = explanation_response.text
                 explanation_usage_metadata = getattr(explanation_response, 'usage_metadata', None)
-                logger.info("    Explanation call successful.")
+                logger.info(f"    Explanation call successful in {duration_explanation:.2f} seconds.")
                 output_content += f"\n\n## Human-Readable Explanation\n\n{explanation_text}\n" # No code block needed for explanation
 
                 # Add usage metadata for the second call
                 if explanation_usage_metadata:
                     output_content += f"\n\n## Usage Metadata (Explanation Call)\n"
-                    output_content += f"- **Prompt Token Count:** {getattr(explanation_usage_metadata, 'prompt_token_count', 'N/A')}\n"
-                    output_content += f"- **Candidates Token Count:** {getattr(explanation_usage_metadata, 'candidates_token_count', 'N/A')}\n"
-                    output_content += f"- **Total Token Count:** {getattr(explanation_usage_metadata, 'total_token_count', 'N/A')}\n"
+                    prompt_tokens = getattr(explanation_usage_metadata, 'prompt_token_count', 0)
+                    candidates_tokens = getattr(explanation_usage_metadata, 'candidates_token_count', 0)
+                    total_tokens = getattr(explanation_usage_metadata, 'total_token_count', 0)
+
+                    output_content += f"- **Prompt Token Count:** {prompt_tokens}\n"
+                    output_content += f"- **Candidates Token Count:** {candidates_tokens}\n"
+                    output_content += f"- **Total Token Count:** {total_tokens}\n"
+                    output_content += f"- **Time Taken:** {duration_explanation:.2f} seconds\n"
+
+                    # Calculate cost for the explanation call
+                    prices = MODEL_PRICING.get(model_name, MODEL_PRICING.get(model_name.replace('-latest', ''), {}))
+                    if prices:
+                        input_cost = (prompt_tokens / 1000) * prices.get("input", 0)
+                        output_cost = (candidates_tokens / 1000) * prices.get("output", 0)
+                        call_cost = input_cost + output_cost
+                        total_cost += call_cost
+                        output_content += f"- **Estimated Cost:** ${call_cost:.6f}\n"
 
             except Exception as e:
                 logger.warning(f"    Failed to get human-readable explanation from second API call: {e}", exc_info=True)
@@ -882,6 +921,9 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
 
 
         # --- 9. Save Final Output ---
+        if total_cost > 0:
+            output_content += f"\n\n## Total Estimated Cost\n\n**Total:** ${total_cost:.6f}\n"
+
         output_filename.write_text(output_content)
         logger.info(f"--- Finished processing for {filepath.name} ---")
         print(f"    Output saved to: {output_filename}") # Use print for final status
@@ -891,24 +933,12 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
     except Exception as e:
         # Enhanced error logging to provide a full traceback in the console
         logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
-        output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
+        filepath = Path(prompt_filepath)
+        model_name_for_error = os.getenv('GEMINI_MODEL_NAME', 'unknown-model')
+        output_filename = filepath.with_name(f"{filepath.stem}.{model_name_for_error}.output.md")
         # Write a more informative error message to the output file
         error_content = (
-            f"# Gemini Output for: {Path(prompt_filepath).name}\n\n"
-            f"---\n\n"
-            f"FATAL PROCESSING ERROR\n"
-            f"Type: {type(e).__name__}\n"
-            f"Details: {e}\n\n"
-            f"Please check the application logs for a full traceback."
-        )
-        output_filename.write_text(error_content)
-        logger.info(f"Error details saved to {output_filename}")
-         # Enhanced error logging to provide a full traceback in the console
-        logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
-        output_filename = Path(prompt_filepath).with_suffix(OUTPUT_SUFFIX)
-        # Write a more informative error message to the output file
-        error_content = (
-            f"# Gemini Output for: {Path(prompt_filepath).name}\n\n"
+            f"# Gemini Output for: {filepath.name}\n\n"
             f"---\n\n"
             f"FATAL PROCESSING ERROR\n"
             f"Type: {type(e).__name__}\n"
