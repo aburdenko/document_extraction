@@ -74,16 +74,20 @@ echo "Activating environment './venv/python3.12'..."
 # This prevents ModuleNotFoundError if requirements.txt changes after the
 # virtual environment has been created.
 echo "Ensuring dependencies from .scripts/requirements.txt are installed..."
-pip install -r .scripts/requirements.txt > /dev/null
+ # Use the full path to the venv pip to ensure we're installing in the correct environment.
+./.venv/python3.12/bin/pip install -r .scripts/requirements.txt > /dev/null
 
 # --- Project Configuration ---
 # All project-wide configuration variables are set here.
 # These are used by the various Python scripts in this project.
 export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
 export REGION="us-central1"
+export LOG_NAME="agentspace_hcls_demo_log"
+
 # Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
 # 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
-export GEMINI_MODEL_NAME="gemini-2.5-pro"
+export GEMINI_MODEL_NAME="gemini-2.5-flash"
+export JUDGEMENT_MODEL_NAME="gemini-2.5-flash" # Model used for evaluations
 #export GEMINI_MODEL_NAME="gemini-2.5-flash"
 # 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
 export EMBEDDING_MODEL_NAME="text-embedding-004"

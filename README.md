@@ -46,6 +46,22 @@ run_gemini_from_file.py
 Which Approach Should You Choose?
 Your choice depends on your specific needs and how much control you want over the process.
 
+When you create a RAG corpus in Vertex AI, you have to explicitly choose the parsing configuration. This is a crucial step because the effectiveness of your RAG system heavily depends on how well it extracts information from your documents.
+
+The different parsing options are:
+
+Default Parser: This is a basic, free parser that works well for simple text documents or digitally-native PDFs with no complex layouts.
+
+Document AI Parsers: These are more powerful and are often used for complex documents. They include:
+
+Layout Parser: Best for documents with rich layouts like tables, lists, and headings, as it understands the structural elements.
+
+OCR: Specifically for scanned documents or images containing text, which the default parser would not be able to process.
+
+You can also combine these options. For example, you might choose to use the Layout Parser and also enable OCR to handle both well-structured digital text and any scanned pages or images within the same document.
+
+This manual selection allows you to optimize for cost and accuracy based on the specific type of documents you're using.
+
 Feature	Use RAG Engine / RAG Corpus	Use Vector Search Directly
 Best For	Quickly building a knowledge base from unstructured documents (PDF, TXT, HTML, etc.) with minimal effort.	Users who already have vector embeddings, need custom chunking/embedding logic, or want fine-grained control over the index.
 Data Pipeline	Automated. You provide the source files, and the engine handles chunking and embedding.	Manual. You are responsible for creating and managing your own chunking and embedding pipeline.

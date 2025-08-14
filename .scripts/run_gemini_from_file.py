@@ -4,6 +4,7 @@
 import os
 import sys
 import argparse
+import uuid
 import re
 import json
 import logging
@@ -22,6 +23,8 @@ from vertexai.generative_models import Part, GenerationConfig, HarmCategory, Har
 
 # They are kept here for reference but are no longer used in the primary RAG path.
 from google.cloud import aiplatform
+from google.cloud import logging as cloud_logging
+from google.cloud.logging.handlers import setup_logging
 from google.cloud import storage
 from vertexai.language_models import TextEmbeddingModel
 # We need protos for schema definition and function calling.
@@ -87,6 +90,40 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s', str
 # logging.basicConfig(level=logging.DEBUG, format='%(levelname)s:%(name)s:%(funcName)s:%(lineno)d: %(message)s', stream=sys.stderr)
 logger = logging.getLogger(__name__)
 # --- End Logging Setup ---
+
+# --- Cloud Logging Setup ---
+def setup_cloud_logging(project_id: str) -> Optional[Tuple[cloud_logging.Client, cloud_logging.handlers.CloudLoggingHandler]]:
+    """
+    Sets up a handler to send logs to Google Cloud Logging.
+    This is not a fatal error; the script will continue with console logging if it fails.
+    Returns the client and handler instances on success, (None, None) on failure.
+    """
+    if not project_id:
+        logger.warning("    Project ID not provided. Skipping Google Cloud Logging setup.")
+        return None, None
+    try:
+        # Get log name from environment variable, with a fallback.
+        log_name = os.getenv("LOG_NAME", "run_gemini_from_file") # A sensible default
+
+        logging_client = cloud_logging.Client(project=project_id)
+
+        # Instead of client.setup_logging(), which hardcodes the log name to 'python',
+        # we create the handler manually to use the name from the LOG_NAME env var.
+        handler = cloud_logging.handlers.CloudLoggingHandler(logging_client, name=log_name)
+
+        # The setup_logging helper attaches the handler to the root logger.
+        setup_logging(handler)
+
+        logger.info(f"    Successfully set up Google Cloud Logging handler for log name: '{log_name}'.")
+        return logging_client, handler
+    except Exception as e:
+        logger.warning(f"    Could not set up Google Cloud Logging: {e}. Logs will only be sent to the console.")
+        return None, None
+
+def log_to_cloud(log_name: str, payload: Dict[str, Any]):
+    """Logs a structured payload to Google Cloud Logging."""
+    logger.info(log_name, extra={'json_fields': payload})
+# --- End Cloud Logging Setup ---
 
 
 # --- Schema Conversion Function ---
@@ -330,6 +367,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
     metadata_dict['max_output_tokens'] = find_int(r"Max(?: Output)? Tokens", file_content)
     metadata_dict['stop_sequences'] = find_string_list(r"Stop Sequences", file_content)
     metadata_dict['safety_settings'] = find_safety_settings(file_content)
+    metadata_dict['logprobs'] = find_int(r"Log Probs", file_content)
     # --- End Parse Known Metadata ---
 
     # Filter out None values
@@ -444,10 +482,12 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
 # --- End Modified parse_sections Function ---
 
 
-def call_gemini_with_prompt_file(prompt_filepath: str):
+def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bool):
     """Processes a single prompt file and calls the Gemini API."""
     try:
         total_cost = 0.0 # Initialize total cost
+        # Generate a unique ID for this entire request (primary + potential explanation call)
+        request_id = f"req-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         logger.info(f"--- Starting processing for {Path(prompt_filepath).name} ---")
         filepath = Path(prompt_filepath)
         print(f"[{datetime.now()}] Processing prompt from: {filepath.name}") # Use print for top-level status
@@ -607,6 +647,15 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         if 'stop_sequences' in metadata:
             generation_config_args['stop_sequences'] = metadata['stop_sequences']
             logger.info(f"    Stop Sequences: {metadata['stop_sequences']}")
+        if 'logprobs' in metadata and metadata['logprobs'] > 0:
+            # The API requires response_logprobs to be true if logprobs (the count) is set.
+            # We pass these as a dictionary directly to generate_content,
+            # bypassing the GenerationConfig class which doesn't have this param.
+            generation_config_args['logprobs'] = metadata['logprobs']
+            generation_config_args['response_logprobs'] = True
+            logger.info(f"    Log Probs: {metadata['logprobs']} (response_logprobs enabled)")
+        elif 'logprobs' in metadata:
+            logger.info(f"    Log Probs set to {metadata['logprobs']}. Not requesting log probabilities from API.")
 
         # Configure JSON mode *only* if requested AND function calling is NOT active
         activate_json_mode = controlled_output_section_found and not proto_tool
@@ -621,12 +670,19 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
             # Check if proto_schema is a valid object (not None)
             if proto_schema:
                 logger.info("    Applying parsed schema to generation config.")
-                generation_config_args['response_schema'] = schema_dict
+                # When passing a raw dictionary for generation_config, the schema
+                # must also be a dictionary, not a proto object.
+                # We convert the glm.Schema object back to a dictionary here.
+                generation_config_args['response_schema'] = type(proto_schema).to_dict(proto_schema)
             else:
                 # This log indicates why the schema wasn't applied
                 logger.warning("    JSON mode activated, but no valid schema was parsed/converted. Requesting generic JSON.")
 
-        generation_config = GenerationConfig(**generation_config_args) if generation_config_args else None
+        # We pass the generation_config_args dictionary directly to the API call
+        # instead of creating a GenerationConfig object. This is necessary to include
+        # 'response_logprobs=True' which is not a parameter in the GenerationConfig
+        # class constructor but is required by the backend API when requesting logprobs.
+        generation_config = generation_config_args if generation_config_args else None
 
         # Determine Safety Settings
         safety_settings = metadata.get('safety_settings', DEFAULT_SAFETY_SETTINGS)
@@ -753,6 +809,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
         output_content += f"## RAW OUTPUT\n\n"
         function_call_requested = False
         response_text = ""
+        function_call_payload = None # For logging
         raw_json_output_for_explanation = None # Store successfully parsed JSON here
 
         try:
@@ -762,6 +819,11 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                     if part.function_call:
                         fc = part.function_call
                         logger.info(f"    Model requested function call: {fc.name}")
+                        # Prepare payload for logging
+                        function_call_payload = {
+                            "name": fc.name,
+                            "args": type(fc.args).to_dict(fc.args) if fc.args else {}
+                        }
                         output_content += f"**Function Call Requested:**\n"
                         output_content += f"- **Name:** `{fc.name}`\n"
                         # Pretty print args if they exist
@@ -791,6 +853,55 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
             logger.error(f"    Error processing response parts/text: {e}", exc_info=True)
             output_content += f"Error processing response content: {e}\n"
 
+        # --- Structured Logging for Primary Call (Consolidated) ---
+        if cloud_logging_enabled:
+            safety_ratings_list = []
+            logprobs_dict = None
+
+            if response.candidates and response.candidates[0]:
+                candidate = response.candidates[0]
+                # Extract safety ratings
+                if candidate.safety_ratings:
+                    safety_ratings_list = [{"category": r.category.name, "probability": r.probability.name, "blocked": r.blocked} for r in candidate.safety_ratings]
+                # Extract logprobs and calculate average for evaluation
+                if hasattr(candidate, 'logprobs') and candidate.logprobs:
+                    logprobs = candidate.logprobs
+                    logprobs_data = {}
+                    if hasattr(logprobs, 'token_log_probs') and logprobs.token_log_probs:
+                        logprobs_data['token_log_probs'] = list(logprobs.token_log_probs)
+                    if hasattr(logprobs, 'top_log_probs') and logprobs.top_log_probs:
+                        logprobs_data['top_log_probs'] = [dict(item) for item in logprobs.top_log_probs]
+                    if logprobs_data:
+                        logprobs_dict = logprobs_data
+
+            # Convert usage metadata to dict
+            usage_metadata_dict = {}
+            if getattr(response, 'usage_metadata', None):
+                usage_metadata = response.usage_metadata
+                usage_metadata_dict = {
+                    "prompt_token_count": usage_metadata.prompt_token_count,
+                    "candidates_token_count": usage_metadata.candidates_token_count,
+                    "total_token_count": usage_metadata.total_token_count,
+                }
+
+            primary_log_payload = {
+                "request_id": request_id,
+                "user_id": os.getenv("USER", "unknown_user"),
+                "prompt_file": filepath.name,
+                "model_name": model_name,
+                "call_type": "primary_generation",
+                "system_instructions": system_instructions,
+                "prompt": user_prompt,
+                "function_call": function_call_payload, # Populated during response processing
+                "response": response_text, # Use 'response' key for eval.py
+                "usage_metadata": usage_metadata_dict,
+                "safety_ratings": safety_ratings_list,
+                "generation_config": generation_config_args,
+                "logprobs": logprobs_dict,
+            }
+
+            log_to_cloud("Gemini API Call", primary_log_payload)
+        # --- End Structured Logging ---
 
         # --- Format Text Output (if applicable) ---
         if not function_call_requested and response_text:
@@ -894,6 +1005,31 @@ def call_gemini_with_prompt_file(prompt_filepath: str):
                 explanation_text = explanation_response.text
                 explanation_usage_metadata = getattr(explanation_response, 'usage_metadata', None)
                 logger.info(f"    Explanation call successful in {duration_explanation:.2f} seconds.")
+
+                # --- Structured Logging for Explanation Call ---
+                if cloud_logging_enabled:
+                    explanation_usage_dict = {}
+                    if explanation_usage_metadata:
+                        explanation_usage_dict = {
+                            "prompt_token_count": explanation_usage_metadata.prompt_token_count,
+                            "candidates_token_count": explanation_usage_metadata.candidates_token_count,
+                            "total_token_count": explanation_usage_metadata.total_token_count,
+                        }
+                    explanation_safety_ratings = [{"category": r.category.name, "probability": r.probability.name, "blocked": r.blocked} for r in explanation_response.candidates[0].safety_ratings] if explanation_response.candidates else []
+
+                    explanation_log_payload = {
+                        "request_id": request_id, # Use same request_id
+                        "user_id": os.getenv("USER", "unknown_user"),
+                        "prompt_file": filepath.name,
+                        "model_name": model_name,
+                        "call_type": "explanation_generation",
+                        "prompt": explanation_prompt,
+                        "response_text": explanation_text,
+                        "usage_metadata": explanation_usage_dict,
+                        "safety_ratings": explanation_safety_ratings,
+                    }
+                    log_to_cloud("Gemini API Call", explanation_log_payload)
+                # --- End Structured Logging ---
                 output_content += f"\n\n## Human-Readable Explanation\n\n{explanation_text}\n" # No code block needed for explanation
 
                 # Add usage metadata for the second call
@@ -1017,11 +1153,34 @@ def main():
 
     args = parser.parse_args()
 
-    # Use print for overall progress, logger for details/warnings/errors
-    print(f"Starting processing for {len(args.prompt_files)} file(s)...")
-    for prompt_file in args.prompt_files:
-        call_gemini_with_prompt_file(prompt_file)
-        print("-" * 30) # Separator between files
+    logging_client = None  # Initialize to None
+    cloud_logging_handler = None # Initialize to None
+    try:
+        # --- Setup Cloud Logging once at the start ---
+        project_id = os.getenv("PROJECT_ID")
+        logging_client, cloud_logging_handler = setup_cloud_logging(project_id)
+        cloud_logging_enabled = logging_client is not None
+        # --- End Setup ---
+
+        # Use print for overall progress, logger for details/warnings/errors
+        print(f"Starting processing for {len(args.prompt_files)} file(s)...")
+        for prompt_file in args.prompt_files:
+            # Pass the logging status to the processing function
+            call_gemini_with_prompt_file(prompt_file, cloud_logging_enabled)
+            print("-" * 30) # Separator between files
+    finally:
+        # Explicitly flush the handler before closing the client to ensure all
+        # logs are sent, addressing potential race conditions at shutdown.
+        if cloud_logging_handler:
+            try:
+                logger.info("Flushing Cloud Logging handler to send pending logs...")
+                cloud_logging_handler.transport.flush()
+            except Exception as e:
+                print(f"Error flushing Cloud Logging handler: {e}", file=sys.stderr)
+
+        if logging_client:
+            # The close() method on the client will flush all handlers.
+            logging_client.close()
 
     print("Processing complete.")
 

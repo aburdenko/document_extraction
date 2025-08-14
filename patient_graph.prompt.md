@@ -5,7 +5,7 @@ Your task is to analyze the provided clinical text for a single patient and tran
 
 # Metadata
 Temperature: 0
-
+Log Probs: 5
 
 The JSON graph must have two top-level keys: "nodes" and "edges".
 

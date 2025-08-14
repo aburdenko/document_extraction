@@ -1,5 +1,10 @@
 google-generativeai
 google-cloud-aiplatform
 google-cloud-storage
+google-cloud-logging
 requests
 pypdf
+matplotlib 
+numpy
+pandas
+scikit-learn
