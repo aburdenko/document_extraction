@@ -503,6 +503,11 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
 
         system_instructions = sections.get("system_instructions")
         user_prompt = sections.get("prompt")
+        ground_truth = sections.get("ground_truth") # Get the new ground_truth section
+        if ground_truth:
+            logger.info("    Found '# Ground Truth' section.")
+        else:
+            logger.info("    No '# Ground Truth' section found. ROUGE metric will not be applicable for this run.")
 
         if not user_prompt:
             # Fallback logic for finding the prompt (same as before)
@@ -746,6 +751,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
                   output_content += f"- **Stop Sequences:** {generation_config_args['stop_sequences']}\n"
 
         # Reflect function/JSON mode status accurately
+        output_content += f"- **'# Ground Truth' Section Found:** {'Yes' if ground_truth else 'No'}\n"
         output_content += f"- **'# RagEngine' Section Found:** {'Yes' if rag_engine_endpoint else 'No'}\n"
         output_content += f"- **RAG Tool Provided to Model:** {'Yes' if rag_tool else 'No'}\n"
         output_content += f"- **'# {CONTROLLED_OUTPUT_SECTION_KEY.replace('_', ' ').title()}' Section Found:** {'Yes' if controlled_output_section_found else 'No'}\n"
@@ -894,6 +900,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
                 "prompt": user_prompt,
                 "function_call": function_call_payload, # Populated during response processing
                 "response": response_text, # Use 'response' key for eval.py
+                "ground_truth": ground_truth, # Add ground_truth to the log payload
                 "usage_metadata": usage_metadata_dict,
                 "safety_ratings": safety_ratings_list,
                 "generation_config": generation_config_args,

@@ -88,6 +88,7 @@ export LOG_NAME="agentspace_hcls_demo_log"
 # 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
 export GEMINI_MODEL_NAME="gemini-2.5-flash"
 export JUDGEMENT_MODEL_NAME="gemini-2.5-flash" # Model used for evaluations
+                             
 #export GEMINI_MODEL_NAME="gemini-2.5-flash"
 # 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
 export EMBEDDING_MODEL_NAME="text-embedding-004"

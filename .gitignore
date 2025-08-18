@@ -2,3 +2,7 @@
 .scripts/.venv/
 .venv/
 **/*.prompt.md.output.md
+last_run_timestamp.txt
+pd
+*.png
+*.csv

@@ -29,11 +29,42 @@ The JSON graph must have two top-level keys: "nodes" and "edges".
 - The final JSON output MUST strictly adhere to the provided JSON schema under the '# Controlled Output Schema' section.
 - Do not include any explanatory text or markdown formatting outside of the single JSON object.
 
-# prompt
+# Prompt
 Based on the system instructions, the provided schema, and the patient data from the RagEngine, generate the JSON graph output for the patient Ana Luisa894 Montalvo564.
 
 # RagEngine
 projects/kallogjeri-project-345114/locations/us-central1/ragCorpora/3458764513820540928
+
+# Ground Truth
+```json
+{
+  "nodes": [
+    {
+      "id": "patient-ana_luisa894_montalvo564",
+      "type": "Patient",
+      "data": {
+        "name": "Ana Luisa894 Montalvo564",
+        "age": 64
+      }
+    },
+    {
+      "id": "condition-ischemic_stroke-2015-05-19",
+      "type": "Condition",
+      "data": {
+        "diagnosis": "Ischemic Stroke",
+        "date": "2015-05-19"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "patient-ana_luisa894_montalvo564",
+      "target": "condition-ischemic_stroke-2015-05-19",
+      "label": "HAS_CONDITION"
+    }
+  ]
+}
+```
 
 # Controlled Output Schema
 ```json
