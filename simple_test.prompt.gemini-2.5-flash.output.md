@@ -19,19 +19,19 @@ threshold: BLOCK_MEDIUM_AND_ABOVE
 , category: HARM_CATEGORY_DANGEROUS_CONTENT
 threshold: BLOCK_MEDIUM_AND_ABOVE
 ]
-- **Timestamp:** 2025-08-18 21:09:10.513795
+- **Timestamp:** 2025-08-19 17:01:39.137513
 
 ## Usage Metadata (Primary Call)
 - **Prompt Token Count:** 7
 - **Candidates Token Count:** 8
 - **Total Token Count:** 38
-- **Time Taken:** 0.86 seconds
+- **Time Taken:** 0.68 seconds
 - **Estimated Cost:** $0.000010
 
 ## RAW OUTPUT
 
 ```text
-The capital of France is **Paris**.
+The capital of England is **London**.
 ```
 
 
