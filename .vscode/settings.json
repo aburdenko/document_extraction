@@ -9,6 +9,13 @@
                 "runIn": "terminal", // Runs in the integrated terminal
                 "runningStatusMessage": "Calling Gemini for ${fileBasename}...",
                 "finishStatusMessage": "${fileBasename} processed by Gemini."
+            },
+            {
+                "match": ".*agent.*\\.md$", // Match any file containing 'agent' and ending in .md
+                "cmd": ". ${workspaceFolder}/.scripts/configure.sh && rm -f ${fileDirname}/${fileBasenameNoExt}.output.md && . ${workspaceFolder}/.venv/python3.12/bin/activate && .venv/python3.12/bin/python3 ${workspaceFolder}/.scripts/run_agent.py ${file}",
+                "runIn": "terminal",
+                "runningStatusMessage": "Running Agent for ${fileBasename}...",
+                "finishStatusMessage": "${fileBasename} processed by Agent."
             }
         ]
     }

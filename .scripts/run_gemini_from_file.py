@@ -1185,9 +1185,7 @@ def main():
             except Exception as e:
                 print(f"Error flushing Cloud Logging handler: {e}", file=sys.stderr)
 
-        if logging_client:
-            # The close() method on the client will flush all handlers.
-            logging_client.close()
+        # The logging_client object does not have a close() method. The transport on the handler is what needs to be managed, which is done above.
 
     print("Processing complete.")
 

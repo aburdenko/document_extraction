@@ -164,6 +164,147 @@ def cleanup_previous_artifacts(experiment_name: str):
     except Exception as e:
         print(f"Warning: An error occurred during artifact cleanup: {e}. This may be expected on the first run.")
 
+def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, run_name: str, experiment_name: str, current_time_str: str, resumed_run: aiplatform.ExperimentRun):
+    """
+    Generates and logs a radar chart showing metrics for each prompt in a run.
+    """
+    print("Generating and logging per-prompt radar chart artifact.")
+
+    # --- Add diagnostic logging to inspect the DataFrame ---
+    print("--- Per-Prompt Metrics Table Diagnostics ---")
+    print("Columns available in metrics_table:", metrics_df.columns.tolist())
+    print("Data types of columns:\n", metrics_df.dtypes)
+    print("First 2 rows of metrics_table:")
+    # Use to_string() to prevent truncation of wide columns
+    print(metrics_df.head(2).to_string())
+    print("------------------------------------------")
+
+    # The 'metrics' list comes from the cleaned summary metrics keys (e.g., ['fluency', 'rouge']).
+    # The evaluation service may return autorater scores (fluency, etc.) as a dictionary
+    # in a column with the metric's name. We need to dynamically extract the 'rating' value.
+    
+    # Create a copy to avoid SettingWithCopyWarning
+    processed_df = metrics_df.copy()
+    metric_cols_to_plot = []
+    final_labels_for_chart = []
+
+    for metric in metrics: # e.g., 'fluency', 'coherence', 'safety', 'rouge'
+        # The detailed metrics table from the SDK uses a 'metric/score' naming convention.
+        score_col_name = f"{metric}/score"
+        if score_col_name in processed_df.columns:
+            # This column exists, now we need to process it for the 0-1 scale of the radar chart.
+            
+            # ROUGE is already 0-1, so we can use it directly.
+            if metric == 'rouge':
+                # No normalization needed.
+                metric_cols_to_plot.append(score_col_name)
+                final_labels_for_chart.append(metric) # Use the clean name for the label
+            else:
+                # This is an autorater metric. Normalize it to 0-1.
+                normalized_col_name = f"{metric}_normalized"
+                print(f"Normalizing autorater metric '{metric}' from column '{score_col_name}' into '{normalized_col_name}'.")
+                
+                if metric in ['fluency', 'coherence']:
+                    # Normalize from [1, 5] to [0, 1] where 5 is best.
+                    # Formula: (score - 1) / (5 - 1)
+                    processed_df[normalized_col_name] = (processed_df[score_col_name] - 1.0) / 4.0
+                elif metric == 'safety':
+                    # Safety score is 1-4, where 1 is best (no concerns).
+                    # We need to invert and normalize it so that 1 (best) -> 1.0 and 4 (worst) -> 0.0.
+                    # Formula: (4 - score) / 3
+                    processed_df[normalized_col_name] = (4.0 - processed_df[score_col_name]) / 3.0
+                else:
+                    # Default to 1-5 scale for any other unknown autorater metric
+                    print(f"Warning: Unhandled autorater metric '{metric}'. Assuming a 1-5 scale for normalization.")
+                    processed_df[normalized_col_name] = (processed_df[score_col_name] - 1.0) / 4.0
+                
+                # Clip values to be strictly between 0 and 1 in case of any oddities.
+                processed_df[normalized_col_name] = processed_df[normalized_col_name].clip(0, 1)
+                
+                metric_cols_to_plot.append(normalized_col_name)
+                final_labels_for_chart.append(metric) # Use the clean name for the label
+        else:
+            print(f"Warning: Expected metric column '{score_col_name}' not found.")
+
+    if not metric_cols_to_plot:
+        print("No valid metric columns could be processed for the per-prompt radar chart. Skipping.")
+        return
+
+    print(f"Final list of metric columns for plotting: {metric_cols_to_plot}")
+    labels = final_labels_for_chart
+    num_vars = len(labels)
+
+    # Compute angle for each axis.
+    angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+    angles += angles[:1]  # Complete the loop.
+
+    fig, ax = plt.subplots(figsize=(12, 12), subplot_kw=dict(polar=True))
+
+    # Use a colormap to differentiate prompts.
+    colors = plt.cm.get_cmap('viridis', len(processed_df))
+
+    for i, row in processed_df.iterrows():
+        # Ensure we only try to plot if all metric columns are present and not NaN for the row
+        if not all(m in row and pd.notna(row[m]) for m in metric_cols_to_plot):
+            continue
+
+        scores = row[metric_cols_to_plot].values.tolist()
+        scores += scores[:1]  # Complete the loop.
+
+        # Create a short label for the legend.
+        prompt_label = f"Prompt {i+1}: {row['prompt'][:40]}..."
+
+        ax.plot(angles, scores, color=colors(i), linewidth=1.5, linestyle='solid', label=prompt_label)
+
+    # --- Format the plot ---
+    ax.set_ylim(0, 1)
+    ax.set_rlabel_position(30)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, size=10)
+    ax.set_title('Per-Prompt Evaluation Metrics', size=16, color='black', y=1.1)
+    ax.grid(True)
+
+    ax.legend(loc='upper right', bbox_to_anchor=(1.4, 1.1))
+
+    latest_png_filename = "per-prompt-radar-chart-latest.png"
+    try:
+        plt.savefig(latest_png_filename, format='png', bbox_inches='tight', dpi=150)
+        print(f"Saved latest per-prompt radar chart for preview: {latest_png_filename}")
+    except Exception as e:
+        print(f"Warning: Could not save latest per-prompt radar chart PNG: {e}")
+
+    pic_io = io.BytesIO()
+    plt.savefig(pic_io, format='png', bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    pic_io.seek(0)
+    base64_png = base64.b64encode(pic_io.read()).decode('utf-8')
+    html_content = f'<html><body><img src="data:image/png;base64,{base64_png}" /></body></html>'
+
+    try:
+        gcs_path = f"eval-artifacts/{experiment_name}/{run_name}"
+        gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}.html"
+        gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_html_filename}"
+        blob = storage.Client(project=PROJECT_ID).bucket(BUCKET_NAME).blob(os.path.join(gcs_path, gcs_html_filename))
+        blob.upload_from_string(html_content, content_type='text/html') # Upload the HTML content to GCS
+        print(f"Uploaded per-prompt radar chart HTML to staging GCS: {gcs_uri}")
+
+        # --- Use the GAPIC client to log the artifact, which is the correct pattern ---
+        client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
+        metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
+        parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
+        artifact_id = f"per-prompt-radar-chart-{current_time_str}"
+        artifact_to_create = aiplatform_v1.Artifact(
+            display_name=f"per-prompt-radar-chart-{current_time_str}",
+            uri=gcs_uri,
+            schema_title="system.html"
+        )
+        created_artifact = metadata_client.create_artifact(parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id)
+        add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(context=resumed_run.resource_name, artifacts=[created_artifact.name])
+        metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
+        print("Per-prompt radar chart artifact successfully associated with the run via GAPIC client.")
+    except Exception as e:
+        print(f"An error occurred while logging the per-prompt radar chart artifact: {e}")
+
 def run_evaluation(event=None, context=None, all_time=False):
     """
     Main function to run the evaluation.
@@ -377,6 +518,20 @@ def run_evaluation(event=None, context=None, all_time=False):
                 print(f"An error occurred while logging the artifact with the GAPIC client: {e}")
         else:
             print("No summary scores found to generate a radar chart. Skipping chart creation.")
+
+        # --- Generate and log the new per-prompt radar chart ---
+        metrics_df = evaluation_result.metrics_table
+        if not metrics_df.empty and clean_labels:
+            # The metric names for the chart axes are the same as the summary chart's clean_labels
+            _generate_per_prompt_radar_chart(
+                metrics_df=metrics_df,
+                metrics=clean_labels, # Pass the derived metric names
+                run_name=run_name,
+                experiment_name=experiment_name,
+                current_time_str=current_time_str,
+                resumed_run=resumed_run
+            )
+
 
     if not all_time:
         save_current_timestamp()

@@ -2,6 +2,46 @@
 git config --global user.email "aburdenko@yahoo.com"
 git config --global user.name "Alex Burdenko"
 
+# --- Project Configuration ---
+# All project-wide configuration variables are set here.
+# These are used by the various Python scripts in this project.
+export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
+# First, ensure your gcloud CLI is configured with your project ID
+gcloud config set project $PROJECT_ID
+
+# Get your project number
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+
+export REGION="us-central1"
+export LOG_NAME="agentspace_hcls_demo_log"
+
+# Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
+# 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
+export GEMINI_MODEL_NAME="gemini-2.5-flash"
+export JUDGEMENT_MODEL_NAME="gemini-2.5-flash" # Model used for evaluations
+                             
+#export GEMINI_MODEL_NAME="gemini-2.5-flash"
+# 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
+export EMBEDDING_MODEL_NAME="text-embedding-004"
+
+# --- GitHub Mirroring Configuration ---
+export GITHUB_REPO_URL="https://github.com/hcls-solutions/rcm-agents/tree/main/test_data/"
+export GITHUB_REPO_BRANCH="main" # Default branch for the repository
+export GITHUB_TARGET_BUCKET="agentspace_hcls_demo" # IMPORTANT: Set a globally unique bucket name.
+export GITHUB_TOKEN="" # Optional: Your GitHub personal access token to increase API rate limits.
+
+# --- Vector Store Configuration ---
+# IMPORTANT: Bucket names must be globally unique.
+# Using your project ID in the bucket name is a good practice.
+export SOURCE_GCS_BUCKET="agentspace_hcls_demo"
+export STAGING_GCS_BUCKET="agentspace_hcls_demo"
+export INDEX_DISPLAY_NAME="agentspace_hcls_demo-store-index"
+export INDEX_ENDPOINT_DISPLAY_NAME="agentspace_hcls_demo-vector-store-endpoint"
+
+
+# --- Google Credentials Setup ---
+SERVICE_ACCOUNT_KEY_FILE="$HOME/service_account.json" # Path points to the user's home directory
+
 # --- Virtual Environment Setup ---
 if [ ! -d ".venv/python3.12" ]; then
   echo "Python virtual environment '.python3.12' not found."
@@ -10,9 +50,17 @@ if [ ! -d ".venv/python3.12" ]; then
   echo "Creating Python virtual environment '.venv/python3.12'..."
   /usr/bin/python3 -m venv .venv/python3.12
   echo "Installing dependencies into .venv/python3.12 from requirements.txt..."
-  # Path is relative to the project root, where this script is intended to be sourced from.
-  ./.venv/python3.12/bin/pip install -r .scripts/requirements.txt
+  
+  # Grant the Vertex AI Service Agent the necessary role on your staging bucket
+  gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET \
+    --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/storage.objectViewer"
 
+    # Grant the Vertex AI Service Agent the necessary role on your staging bucket
+  gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET \
+    --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/storage.objectViewer"
+    
   # --- Ensure 'unzip' is installed for VSIX validation ---
   if ! command -v unzip &> /dev/null; then
     echo "'unzip' command not found. Attempting to install..."
@@ -76,51 +124,6 @@ echo "Activating environment './venv/python3.12'..."
 echo "Ensuring dependencies from .scripts/requirements.txt are installed..."
  # Use the full path to the venv pip to ensure we're installing in the correct environment.
 ./.venv/python3.12/bin/pip install -r .scripts/requirements.txt > /dev/null
-
-# --- Project Configuration ---
-# All project-wide configuration variables are set here.
-# These are used by the various Python scripts in this project.
-export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
-# First, ensure your gcloud CLI is configured with your project ID
-gcloud config set project $PROJECT_ID
-
-# Get your project number
-PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-
-# Grant the Vertex AI Service Agent the necessary role on your staging bucket
-gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET \
-  --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com" \
-  --role="roles/storage.objectViewer"
-
-export REGION="us-central1"
-export LOG_NAME="agentspace_hcls_demo_log"
-
-# Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
-# 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
-export GEMINI_MODEL_NAME="gemini-2.5-flash"
-export JUDGEMENT_MODEL_NAME="gemini-2.5-flash" # Model used for evaluations
-                             
-#export GEMINI_MODEL_NAME="gemini-2.5-flash"
-# 'text-embedding-004' is the latest stable text embedding model, replacing the older 'textembedding-gecko@003'.
-export EMBEDDING_MODEL_NAME="text-embedding-004"
-
-# --- GitHub Mirroring Configuration ---
-export GITHUB_REPO_URL="https://github.com/hcls-solutions/rcm-agents/tree/main/test_data/"
-export GITHUB_REPO_BRANCH="main" # Default branch for the repository
-export GITHUB_TARGET_BUCKET="agentspace_hcls_demo" # IMPORTANT: Set a globally unique bucket name.
-export GITHUB_TOKEN="" # Optional: Your GitHub personal access token to increase API rate limits.
-
-# --- Vector Store Configuration ---
-# IMPORTANT: Bucket names must be globally unique.
-# Using your project ID in the bucket name is a good practice.
-export SOURCE_GCS_BUCKET="agentspace_hcls_demo"
-export STAGING_GCS_BUCKET="agentspace_hcls_demo"
-export INDEX_DISPLAY_NAME="agentspace_hcls_demo-store-index"
-export INDEX_ENDPOINT_DISPLAY_NAME="agentspace_hcls_demo-vector-store-endpoint"
-
-
-# --- Google Credentials Setup ---
-SERVICE_ACCOUNT_KEY_FILE="$HOME/service_account.json" # Path points to the user's home directory
 
 if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
   echo "Service account key found. Exporting GOOGLE_APPLICATION_CREDENTIALS."
