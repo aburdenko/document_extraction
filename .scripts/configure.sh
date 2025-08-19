@@ -81,6 +81,17 @@ echo "Ensuring dependencies from .scripts/requirements.txt are installed..."
 # All project-wide configuration variables are set here.
 # These are used by the various Python scripts in this project.
 export PROJECT_ID="kallogjeri-project-345114" # Your Google Cloud project ID.
+# First, ensure your gcloud CLI is configured with your project ID
+gcloud config set project $PROJECT_ID
+
+# Get your project number
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+
+# Grant the Vertex AI Service Agent the necessary role on your staging bucket
+gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET \
+  --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+  --role="roles/storage.objectViewer"
+
 export REGION="us-central1"
 export LOG_NAME="agentspace_hcls_demo_log"
 

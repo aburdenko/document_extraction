@@ -1,5 +1,5 @@
 # Prompt
-What is the capital of France?
+What is the capital of England?
 
 # Ground Truth
-The capital of France is Paris.
+The capital of France is London.

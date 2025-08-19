@@ -1,8 +1,14 @@
-.creds/
-.scripts/.venv/
+# Python virtual environment
 .venv/
-**/*.prompt.md.output.md
-last_run_timestamp.txt
-pd
-*.png
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Generated output and artifact files
+*.output.md
+*.html
 *.csv
+*.png
+last_run_timestamp.txt
+*.output.md
