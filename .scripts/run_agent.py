@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 MAX_AGENT_STEPS = 10 # Prevent infinite loops
 
 # Regex to find sections like # Name, # Instruction, etc.
-SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
+SECTION_PATTERN = re.compile(r"^\s*#+\s+([\w\s]+)\s*$", re.MULTILINE)
 
 # --- Tool and Logging Setup ---
 AVAILABLE_TOOLS = {
@@ -56,12 +56,31 @@ def log_to_cloud(payload: Dict[str, Any]):
     """Logs a structured payload to Google Cloud Logging."""
     logger.info("Agent Log", extra={'json_fields': payload})
 
+class AgentLogger:
+    """A helper class to manage consistent logging for an agent session."""
+    def __init__(self, session_id: str, instruction: str, initial_prompt: str, ground_truth: str):
+        self.base_payload = {
+            "session_id": session_id,
+            "instruction": instruction,
+            "initial_prompt": initial_prompt,
+            "ground_truth": ground_truth,
+        }
+
+    def log(self, payload: Dict[str, Any]):
+        """Merges the given payload with the base session payload and logs it."""
+        full_payload = self.base_payload.copy()
+        full_payload.update(payload)
+        log_to_cloud(full_payload)
+
 def parse_sections(text_content: str) -> Dict[str, str]:
-    """Parses the text content into sections based on headings."""
+    """
+    Parses the text content into sections based on headings and strips
+    markdown code fences from each section's content.
+    """
     sections: Dict[str, str] = {}
     last_pos = 0
-    # Content before the first heading is not captured in this agentic format.
-    current_section_name = None
+    # Content before the first heading is captured as 'initial_content'.
+    current_section_name = "initial_content"
 
     for match in SECTION_PATTERN.finditer(text_content):
         if current_section_name is not None:
@@ -75,6 +94,14 @@ def parse_sections(text_content: str) -> Dict[str, str]:
 
     if current_section_name is not None:
         sections[current_section_name] = text_content[last_pos:].strip()
+
+    # After parsing, strip code fences from all section values for robustness.
+    for key, value in sections.items():
+        # Use \w* to match any language identifier (json, plaintext, etc.) or none.
+        stripped_value = re.sub(r"^\s*```\w*\s*", "", value, flags=re.IGNORECASE | re.MULTILINE)
+        stripped_value = re.sub(r"\s*```\s*$", "", stripped_value, flags=re.MULTILINE).strip()
+        sections[key] = stripped_value
+
     return sections
 
 # --- Core Agent Logic ---
@@ -88,15 +115,32 @@ def run_agent(prompt_filepath: str):
     sections = parse_sections(file_content)
 
     agent_name = sections.get("name", session_id)
-    system_instruction = sections.get("instruction", "You are a helpful agent.")
+    # Prioritize 'instruction', fall back to 'system_instructions', then to a default.
+    system_instruction = sections.get("instruction") or sections.get("system_instructions") or "You are a helpful agent."
     initial_prompt = sections.get("prompt", "")
     ground_truth = sections.get("ground_truth", "")
     tools_json_str = sections.get("tools", "[]")
 
-    # Remove ```json ``` wrappers from tools string
-    tools_json_str = re.sub(r"^\s*```(?:json)?\s*", "", tools_json_str, flags=re.IGNORECASE | re.MULTILINE)
-    tools_json_str = re.sub(r"\s*```\s*$", "", tools_json_str, flags=re.MULTILINE).strip()
+    # Fallback logic: If no '# Prompt' section, use the initial content.
+    if not initial_prompt and 'initial_content' in sections:
+        initial_prompt = sections.get('initial_content', '').strip()
+        if initial_prompt:
+            logger.warning("No '# Prompt' section found. Using content before the first heading as the initial prompt.")
 
+    if not initial_prompt:
+        logger.error("The '# Prompt' section is missing or empty in the task file, and no fallback content was found. The agent cannot start without an initial prompt.")
+        # Exit gracefully without creating an output file, as no work was done.
+        return
+
+    # Instantiate the logger with the base information for the session.
+    agent_logger = AgentLogger(
+        session_id=session_id,
+        instruction=system_instruction,
+        initial_prompt=initial_prompt,
+        ground_truth=ground_truth
+    )
+
+    # Code fence stripping is now handled robustly in the parse_sections function.
     # 2. Setup Model and Tools
     model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-2.5-flash')
     model = GenerativeModel(
@@ -106,38 +150,40 @@ def run_agent(prompt_filepath: str):
     
     all_tools = []
     function_declarations = []
-    try:
-        tools_list = json.loads(tools_json_str)
-        for tool_config in tools_list:
-            tool_type = tool_config.get("type")
-            if tool_type == "VertexAiRagRetrieval":
-                rag_corpus = tool_config.get("rag_corpus")
-                if rag_corpus:
-                    # The RagRetrievalConfig expects 'top_k', not 'similarity_top_k'.
-                    # We check for both for backward compatibility with the markdown file.
-                    retrieval_config = rag.RagRetrievalConfig(
-                        top_k=tool_config.get("top_k", tool_config.get("similarity_top_k", 10)),
-                        # The 'distance_threshold' parameter is no longer supported in this class in the latest SDK.
-                    )
-                    # The retrieval_config should be passed to the VertexRagStore source, not to the Retrieval object.
-                    retrieval = rag.Retrieval(
-                        source=rag.VertexRagStore(
-                            rag_resources=[rag.RagResource(rag_corpus=rag_corpus)], rag_retrieval_config=retrieval_config
+    # Only attempt to parse JSON if the tools string is not empty.
+    if tools_json_str:
+        try:
+            tools_list = json.loads(tools_json_str)
+            for tool_config in tools_list:
+                tool_type = tool_config.get("type")
+                if tool_type == "VertexAiRagRetrieval":
+                    rag_corpus = tool_config.get("rag_corpus")
+                    if rag_corpus:
+                        # The RagRetrievalConfig expects 'top_k', not 'similarity_top_k'.
+                        # We check for both for backward compatibility with the markdown file.
+                        retrieval_config = rag.RagRetrievalConfig(
+                            top_k=tool_config.get("top_k", tool_config.get("similarity_top_k", 10)),
+                            # The 'distance_threshold' parameter is no longer supported in this class in the latest SDK.
                         )
-                    )
-                    rag_tool = Tool.from_retrieval(retrieval)
-                    all_tools.append(rag_tool)
-                    logger.info(f"Configured RAG tool '{tool_config.get('name')}' with corpus: {rag_corpus}")
-            elif tool_type == "FunctionTool":
-                tool_name = tool_config.get("name")
-                if tool_name in AVAILABLE_TOOLS:
-                    func = AVAILABLE_TOOLS[tool_name]
-                    function_declarations.append(FunctionDeclaration.from_func(func))
-                    logger.info(f"Found Function tool: '{tool_name}'")
-                else:
-                    logger.warning(f"Function tool '{tool_name}' defined in markdown but not found in agent_tools.py")
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing JSON in # Tools section: {e}")
+                        # The retrieval_config should be passed to the VertexRagStore source, not to the Retrieval object.
+                        retrieval = rag.Retrieval(
+                            source=rag.VertexRagStore(
+                                rag_resources=[rag.RagResource(rag_corpus=rag_corpus)], rag_retrieval_config=retrieval_config
+                            )
+                        )
+                        rag_tool = Tool.from_retrieval(retrieval)
+                        all_tools.append(rag_tool)
+                        logger.info(f"Configured RAG tool '{tool_config.get('name')}' with corpus: {rag_corpus}")
+                elif tool_type == "FunctionTool":
+                    tool_name = tool_config.get("name")
+                    if tool_name in AVAILABLE_TOOLS:
+                        func = AVAILABLE_TOOLS[tool_name]
+                        function_declarations.append(FunctionDeclaration.from_func(func))
+                        logger.info(f"Found Function tool: '{tool_name}'")
+                    else:
+                        logger.warning(f"Function tool '{tool_name}' defined in markdown but not found in agent_tools.py")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON in # Tools section: {e}")
 
     if function_declarations:
         all_tools.append(Tool(function_declarations=function_declarations))
@@ -168,10 +214,9 @@ def run_agent(prompt_filepath: str):
             tool_args = {key: value for key, value in function_call.args.items()}
             print(f"Action: Calling tool '{tool_name}' with args: {tool_args}")
 
-            log_to_cloud({
-                "session_id": session_id, "step": step, "log_type": "thought",
-                "thought": f"Decided to call tool '{tool_name}' with arguments {tool_args}.",
-                "instruction": system_instruction, "initial_prompt": initial_prompt, "ground_truth": ground_truth
+            agent_logger.log({
+                "step": step, "log_type": "thought",
+                "thought": f"Decided to call tool '{tool_name}' with arguments {tool_args}."
             })
 
             if tool_name in AVAILABLE_TOOLS:
@@ -179,8 +224,8 @@ def run_agent(prompt_filepath: str):
                 try:
                     tool_output = tool_function(**tool_args)
                     print(f"Observation: {tool_output}")
-                    log_to_cloud({
-                        "session_id": session_id, "step": step, "log_type": "tool_result",
+                    agent_logger.log({
+                        "step": step, "log_type": "tool_result",
                         "tool_name": tool_name, "tool_args": tool_args, "tool_output": tool_output
                     })
                     conversation_history.append(response.candidates[0].content) # Add model's function call
@@ -200,9 +245,8 @@ def run_agent(prompt_filepath: str):
                 logger.warning("Model finished without a function call or a text response. The agent might be stuck or has completed its task implicitly.")
                 final_answer = "(No final text answer provided by the model)"
             print(f"\nFinal Answer: {final_answer}")
-            log_to_cloud({
-                "session_id": session_id, "step": step, "log_type": "final_answer",
-                "final_answer": final_answer
+            agent_logger.log({
+                "step": step, "log_type": "final_answer", "final_answer": final_answer
             })
             break # Agent has finished
 

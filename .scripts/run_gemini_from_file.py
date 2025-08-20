@@ -35,7 +35,7 @@ import google.ai.generativelanguage as glm
 # Default model is now primarily set in .scripts/configure.sh as GEMINI_MODEL_NAME
 # A fallback is provided in the code where it's used.
 # Regex to find sections like # System Instructions, # Prompt, etc.
-SECTION_PATTERN = re.compile(r"^\s*#\s+([\w\s]+)\s*$", re.MULTILINE)
+SECTION_PATTERN = re.compile(r"^\s*#+\s+([\w\s]+)\s*$", re.MULTILINE)
 RAG_ENGINE_SECTION_KEY = "ragengine"
 # --- Define the key we expect for the schema section ---
 CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
@@ -451,7 +451,7 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         logger.info("    Found '# Functions' section.")
         functions_json_str = sections['functions']
         # Remove potential ```json ``` wrappers
-        functions_json_str = re.sub(r"^\s*```(?:json)?\s*", "", functions_json_str, flags=re.IGNORECASE | re.MULTILINE)
+        functions_json_str = re.sub(r"^\s*```\w*\s*", "", functions_json_str, flags=re.IGNORECASE | re.MULTILINE)
         functions_json_str = re.sub(r"\s*```\s*$", "", functions_json_str, flags=re.MULTILINE)
         functions_json_str = functions_json_str.strip()
 

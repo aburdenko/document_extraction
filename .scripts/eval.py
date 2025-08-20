@@ -132,9 +132,10 @@ def cleanup_previous_artifacts(experiment_name: str):
             artifacts_to_delete = []
             for artifact in run.get_artifacts():
                 # Find artifacts by their display name
-                if artifact.display_name.startswith("radar-chart-") or artifact.display_name == "per-prompt-metrics-table":
+                if (artifact.display_name.startswith("radar-chart-") or
+                    artifact.display_name == "per-prompt-metrics-table" or
+                    artifact.display_name == "per-prompt-radar-chart"):
                     artifacts_to_delete.append(artifact)
-            
             if not artifacts_to_delete:
                 print(f"    No matching artifacts found in run '{run.name}'.")
                 continue
@@ -294,7 +295,7 @@ def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, ru
         parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
         artifact_id = f"per-prompt-radar-chart-{current_time_str}"
         artifact_to_create = aiplatform_v1.Artifact(
-            display_name=f"per-prompt-radar-chart-{current_time_str}",
+            display_name="per-prompt-radar-chart",
             uri=gcs_uri,
             schema_title="system.html"
         )
