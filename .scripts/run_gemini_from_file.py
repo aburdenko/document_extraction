@@ -7,8 +7,8 @@ import argparse
 import uuid
 import re
 import json
-import logging
-from datetime import datetime
+import logging, hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import time
 from typing import Dict, Any, Tuple, Optional, List
@@ -16,6 +16,14 @@ from typing import Dict, Any, Tuple, Optional, List
 # --- SDK Imports ---
 # This script now uses the Vertex AI SDK for generation to support integrated RAG.
 import vertexai
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from vertexai.preview.evaluation import EvalTask, AutoraterConfig
+import io
+import base64
 # The RAG features are in the 'preview' namespace.
 from vertexai.preview import rag
 from vertexai.preview.generative_models import GenerativeModel, Tool
@@ -32,11 +40,22 @@ import google.ai.generativelanguage as glm
 # --- End Add necessary imports ---
 
 # --- Constants ---
+# --- Project Configuration (from environment) ---
+PROJECT_ID = os.environ.get("PROJECT_ID", "your-gcp-project-id")
+LOCATION = os.environ.get("REGION", "us-central1")
+BUCKET_NAME = os.environ.get("STAGING_GCS_BUCKET", "your-bucket-name")
+SHORT_LOG_NAME = os.environ.get("LOG_NAME", "run_gemini_from_file")
+LOG_NAME = f"projects/{PROJECT_ID}/logs/{SHORT_LOG_NAME}"
+JUDGEMENT_MODEL_NAME = os.environ.get("JUDGEMENT_MODEL_NAME", "gemini-1.5-flash")
+EXPERIMENT_NAME = "gemini-playground-evaluation" # Used for GCS artifact path
 # Default model is now primarily set in .scripts/configure.sh as GEMINI_MODEL_NAME
 # A fallback is provided in the code where it's used.
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#+\s+([\w\s]+)\s*$", re.MULTILINE)
 RAG_ENGINE_SECTION_KEY = "ragengine"
+SUPPORTED_ON_DEMAND_METRICS = [
+    "fluency", "coherence", "safety", "rouge", "bleu", "exact_match"
+]
 # --- Define the key we expect for the schema section ---
 CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
 
@@ -377,7 +396,7 @@ def parse_metadata_and_body(file_content: str) -> Tuple[Dict[str, Any], str]:
 
 
 # --- Modified parse_sections Function ---
-def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], Optional[Dict[str, Any]], bool, Optional[glm.Tool], bool, Optional[str]]:
+def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Schema], Optional[Dict[str, Any]], bool, Optional[glm.Tool], bool, Optional[str], Optional[List[str]]]:
     """
     Parses the text content into sections based on headings.
     Checks for '# Controlled Output Schema', '# Functions', and '# RagEngine'.
@@ -389,6 +408,7 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         - proto_tool: Parsed proto tool from '# Functions' (or None).
         - functions_section_found: Flag indicating if '# Functions' was found.
         - rag_engine_endpoint: The display name of the Vector Search endpoint from '# RagEngine' section.
+        - eval_metrics_list: A list of metrics from the '# Eval Metrics' section.
     """
     sections: Dict[str, str] = {}
     last_pos = 0
@@ -408,6 +428,13 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
     section_content = text_content[last_pos:].strip()
     if section_content:
         sections[current_section_name] = section_content
+
+    # After parsing, strip code fences from all section values for robustness.
+    for key, value in sections.items():
+        # Use \w* to match any language identifier (json, plaintext, etc.) or none.
+        stripped_value = re.sub(r"^\s*```\w*\s*", "", value, flags=re.IGNORECASE | re.MULTILINE)
+        stripped_value = re.sub(r"\s*```\s*$", "", stripped_value, flags=re.MULTILINE).strip()
+        sections[key] = stripped_value
 
     # --- Schema Extraction ---
     schema_dict = None
@@ -477,10 +504,137 @@ def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[glm.Sche
         rag_engine_endpoint = rag_engine_endpoint.strip()
         logger.info(f"    Found '# RagEngine' section. RAG resource specified: '{rag_engine_endpoint}'")
 
+    # --- Eval Metrics Extraction ---
+    eval_metrics_list = None
+    eval_metrics_content = None
 
-    return sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint
+    if "eval_metrics" in sections:
+        eval_metrics_content = sections["eval_metrics"]
+    elif "evall_metrics" in sections:
+        eval_metrics_content = sections["evall_metrics"]
+        logger.warning("    Found section with typo '# Evall Metrics'. Processing it as '# Eval Metrics'.")
+
+    if eval_metrics_content is not None:
+        logger.info("    Found '# Eval Metrics' section.")
+        metrics_str = eval_metrics_content.strip()
+        if metrics_str:
+            # Normalize metric names to be lowercase and correct common errors.
+            raw_metrics = [metric.strip().lower().replace('\\', '') for metric in metrics_str.split(',') if metric.strip()]
+            validated_metrics = []
+            for metric in raw_metrics:
+                if metric == 'rogue':
+                    metric = 'rouge' # Correct common misspelling
+                    logger.info("    Corrected user-provided metric 'rogue' to 'rouge'.")
+                
+                if metric in SUPPORTED_ON_DEMAND_METRICS:
+                    validated_metrics.append(metric)
+                else:
+                    logger.warning(f"    Unsupported metric '{metric}' found in '# Eval Metrics' and will be ignored. Supported metrics are: {SUPPORTED_ON_DEMAND_METRICS}")
+
+            eval_metrics_list = validated_metrics
+            logger.info(f"    Normalized and validated metrics for on-demand evaluation: {eval_metrics_list}")
+
+    return sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint, eval_metrics_list
 # --- End Modified parse_sections Function ---
 
+def _generate_and_log_radar_chart(summary_metrics: dict, run_name: str, resumed_run: "aiplatform.ExperimentRun") -> Tuple[Optional[str], Optional[str]]:
+    """Generates a summary radar chart, uploads it, and logs it as an artifact."""
+    logger.info("    Generating and logging summary radar chart artifact.")
+    labels = [key for key in summary_metrics.keys() if "/mean" in key]
+    scores = [summary_metrics[key] for key in labels]
+    clean_labels = [label.replace('/mean', '') for label in labels]
+
+    if not clean_labels or not scores:
+        logger.warning("    No summary scores found to generate a radar chart.")
+        return None, None
+
+    num_vars = len(clean_labels)
+    angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+    scores += scores[:1]
+    angles += angles[:1]
+
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    ax.plot(angles, scores, linewidth=2, linestyle='solid', label='Model Performance')
+    ax.fill(angles, scores, 'b', alpha=0.1)
+    ax.set_yticklabels([])
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(clean_labels)
+    ax.set_title('On-Demand Evaluation Summary', size=12, color='black', va='center')
+    ax.grid(True)
+
+    try:
+        pic_io = io.BytesIO()
+        plt.savefig(pic_io, format='png', bbox_inches='tight', dpi=150)
+        plt.close(fig)
+        pic_io.seek(0)
+
+        current_time_str = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        gcs_path = f"eval-artifacts/{EXPERIMENT_NAME}/{run_name}"
+        gcs_filename = f"summary-radar-chart-{current_time_str}.png"
+        gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_filename}"
+        
+        storage_client = storage.Client(project=PROJECT_ID)
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(os.path.join(gcs_path, gcs_filename))
+        blob.upload_from_file(pic_io, content_type='image/png', rewind=True)
+        logger.info(f"    Uploaded summary chart to GCS: {gcs_uri}")
+
+        resumed_run.log_artifact(gcs_uri, artifact_display_name="summary-radar-chart")
+
+        pic_io.seek(0)
+        base64_png = base64.b64encode(pic_io.getvalue()).decode('utf-8')
+        html_content = f'<img src="data:image/png;base64,{base64_png}" />'
+        
+        return html_content, gcs_uri
+
+    except Exception as e:
+        logger.error(f"    Failed to generate or log radar chart: {e}", exc_info=True)
+        return None, None
+
+def _log_metrics_csv_artifact(metrics_df: pd.DataFrame, run_name: str, resumed_run: "aiplatform.ExperimentRun"):
+    """Logs the per-prompt metrics DataFrame as a CSV artifact."""
+    if metrics_df.empty:
+        logger.warning("    Metrics DataFrame is empty. Skipping CSV artifact logging.")
+        return
+    
+    logger.info("    Logging per-prompt metrics as CSV artifact.")
+    try:
+        current_time_str = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        gcs_path = f"eval-artifacts/{EXPERIMENT_NAME}/{run_name}"
+        gcs_filename = f"per-prompt-metrics-{current_time_str}.csv"
+        gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_filename}"
+
+        storage_client = storage.Client(project=PROJECT_ID)
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(os.path.join(gcs_path, gcs_filename))
+        
+        blob.upload_from_string(metrics_df.to_csv(index=False), 'text/csv')
+        logger.info(f"    Uploaded metrics CSV to GCS: {gcs_uri}")
+
+        resumed_run.log_artifact(gcs_uri, artifact_display_name="per-prompt-metrics-table")
+        logger.info("    Successfully logged CSV artifact to experiment run.")
+    except Exception as e:
+        logger.error(f"    Failed to log metrics CSV artifact: {e}", exc_info=True)
+
+def run_evaluation_on_dataframe(eval_df: pd.DataFrame, metrics_to_run: List[str]) -> Optional[pd.DataFrame]:
+    """Runs the Vertex Evaluation service on a given DataFrame."""
+    try:
+        logger.info(f"    Running evaluation for {len(eval_df)} rows with metrics: {metrics_to_run}")
+        full_judgement_model_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{JUDGEMENT_MODEL_NAME}"
+        autorater_config = AutoraterConfig(autorater_model=full_judgement_model_name)
+        
+        eval_task = EvalTask(
+            dataset=eval_df,
+            metrics=metrics_to_run,
+            autorater_config=autorater_config,
+        )
+        # Running evaluate() without an experiment_run_name performs the evaluation without creating an experiment run.
+        evaluation_result = eval_task.evaluate()
+        logger.info("    Evaluation task completed.")
+        return evaluation_result.metrics_table
+    except Exception as e:
+        logger.error(f"    Error during on-demand evaluation: {e}", exc_info=True)
+        return None
 
 def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bool):
     """Processes a single prompt file and calls the Gemini API."""
@@ -499,13 +653,17 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
         logger.info(f"    Parsed Metadata: {metadata}")
 
         # 2. Parse Sections, Schema, and Functions
-        sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint = parse_sections(body)
+        sections, proto_schema, schema_dict, controlled_output_section_found, proto_tool, functions_section_found, rag_engine_endpoint, eval_metrics_list = parse_sections(body)
 
         system_instructions = sections.get("system_instructions")
         user_prompt = sections.get("prompt")
         ground_truth = sections.get("ground_truth") # Get the new ground_truth section
+        intent_id = None # Initialize intent_id
         if ground_truth:
             logger.info("    Found '# Ground Truth' section.")
+            # Create a stable hash of the ground truth to use as an intent identifier
+            intent_id = hashlib.sha256(ground_truth.encode('utf-8')).hexdigest()
+            logger.info(f"    Generated Intent ID (from ground_truth hash): {intent_id[:12]}...")
         else:
             logger.info("    No '# Ground Truth' section found. ROUGE metric will not be applicable for this run.")
 
@@ -901,6 +1059,7 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
                 "function_call": function_call_payload, # Populated during response processing
                 "response": response_text, # Use 'response' key for eval.py
                 "ground_truth": ground_truth, # Add ground_truth to the log payload
+                "intent_id": intent_id, # Add the intent ID for grouping
                 "usage_metadata": usage_metadata_dict,
                 "safety_ratings": safety_ratings_list,
                 "generation_config": generation_config_args,
@@ -1069,9 +1228,62 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
              # output_content += f"\n\n## Human-Readable Explanation\n\n(Skipped: JSON generated without a successfully parsed schema being applied.)\n"
 
 
+        # --- 9. On-Demand Evaluation ---
+        eval_output_section = ""
+        if eval_metrics_list:
+            logger.info("--- On-demand Evaluation & Experiment Logging ---")
+            
+            # Some metrics require a ground truth. Check if it's missing for those.
+            metrics_requiring_gt = ['rouge', 'bleu', 'exact_match']
+            requires_gt = any(m in eval_metrics_list for m in metrics_requiring_gt)
+            
+            if requires_gt and not ground_truth:
+                logger.warning("    On-demand evaluation skipped: One or more specified metrics require a '# Ground Truth' section, which was not found.")
+                eval_output_section = f"\n\n## Eval Output\n\n(On-demand evaluation skipped: Metrics like `{', '.join(metrics_requiring_gt)}` require a '# Ground Truth' section, which was not found.)\n"
+            else:
+                # --- NEW EXPERIMENT LOGIC ---
+                aiplatform.init(project=PROJECT_ID, location=LOCATION, experiment=EXPERIMENT_NAME)
+                current_time_str = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+                # Sanitize filename for the run name
+                sanitized_stem = re.sub(r'[^a-zA-Z0-9-]', '-', filepath.stem)
+                run_name = f"prompt-run-{sanitized_stem}-{current_time_str}"
+
+                logger.info(f"    Creating new experiment run: '{run_name}'")
+                current_run_df = pd.DataFrame([{"prompt": user_prompt, "response": response_text, "reference": ground_truth or ''}])
+                
+                full_judgement_model_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{JUDGEMENT_MODEL_NAME}"
+                autorater_config = AutoraterConfig(autorater_model=full_judgement_model_name)
+                
+                eval_task = EvalTask(dataset=current_run_df, metrics=eval_metrics_list, autorater_config=autorater_config)
+
+                try:
+                    evaluation_result = eval_task.evaluate(experiment_run_name=run_name)
+                    logger.info("    Evaluation task completed and logged to new experiment run.")
+
+                    with aiplatform.start_run(run=run_name, resume=True) as resumed_run:
+                        summary_metrics = evaluation_result.summary_metrics
+                        resumed_run.log_metrics(summary_metrics)
+                        logger.info(f"    Logged summary metrics: {summary_metrics}")
+
+                        _log_metrics_csv_artifact(evaluation_result.metrics_table, run_name, resumed_run)
+                        html_chart, gcs_uri = _generate_and_log_radar_chart(summary_metrics, run_name, resumed_run)
+
+                        eval_output_section = "\n\n## Eval Output\n\n"
+                        if html_chart:
+                            eval_output_section += f"{html_chart}\n"
+                        
+                        run_url = f"https://console.cloud.google.com/vertex-ai/locations/{LOCATION}/experiments/experiments/{EXPERIMENT_NAME}/runs/{run_name}?project={PROJECT_ID}"
+                        eval_output_section += f"\nView full evaluation results in Vertex AI Experiments\n"
+
+                except Exception as e:
+                    logger.error(f"    Failed to run evaluation or log artifacts: {e}", exc_info=True)
+                    eval_output_section = f"\n\n## Eval Output\n\n(Failed to execute evaluation and log to Vertex AI Experiments: {e})\n"
+
         # --- 9. Save Final Output ---
         if total_cost > 0:
             output_content += f"\n\n## Total Estimated Cost\n\n**Total:** ${total_cost:.6f}\n"
+        
+        output_content += eval_output_section
 
         output_filename.write_text(output_content)
         logger.info(f"--- Finished processing for {filepath.name} ---")

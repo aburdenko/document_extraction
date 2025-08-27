@@ -1,12 +1,15 @@
-# Name
+## Name
+
 Patient Information Agent (Structured)
 
-# Instruction
-You are a helpful agent. Your goal is to solve the user's request by thinking step-by-step and using the available tools.
-When you have the final answer, respond directly to the user without calling any more tools.
+## Instruction
 
-# Tools
-```json
+You are a helpful agent. Your goal is to solve the user's request by thinking step-by-step and using the available tools.  
+When you have the final answer, respond directly to the user without calling any more tools
+
+## Tools
+
+```plaintext
 [
   {
     "type": "VertexAiRagRetrieval",
@@ -17,11 +20,13 @@ When you have the final answer, respond directly to the user without calling any
 ]
 ```
 
-# Prompt
-Please tell me the current diagnosis for patient ana luis montalvo.
+## Prompt
 
-# Ground Truth
-```json
+Please tell me the current diagnosis for patient ana luis montalvo
+
+## Ground Truth
+
+```plaintext
 {
   "nodes": [
     {

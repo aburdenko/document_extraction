@@ -12,12 +12,20 @@ gcloud config set project $PROJECT_ID
 # Get your project number
 PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
 
+# The IAM service account the Cloud Function will run as.
+# This is set to match the service account used for local testing to ensure consistent permissions.
+export FUNCTION_SERVICE_ACCOUNT="${PROJECT_ID}@appspot.gserviceaccount.com"
+
 export REGION="us-central1"
 export LOG_NAME="agentspace_hcls_demo_log"
 
+# --- Presentation Sharing Configuration ---
+# The email address to share the generated Google Slides with.
+export DRIVE_SHARE_EMAIL="aburdenko@google.com"
+
 # Use the latest stable model versions. The previous names were incorrect or pointed to older versions.
 # 'gemini-1.5-flash-latest' is the correct name for the latest flash model.
-export GEMINI_MODEL_NAME="gemini-2.5-flash"
+export GEMINI_MODEL_NAME="gemini-2.5-pro"
 export JUDGEMENT_MODEL_NAME="gemini-2.5-flash" # Model used for evaluations
                              
 #export GEMINI_MODEL_NAME="gemini-2.5-flash"
@@ -40,7 +48,10 @@ export INDEX_ENDPOINT_DISPLAY_NAME="agentspace_hcls_demo-vector-store-endpoint"
 
 
 # --- Google Credentials Setup ---
-SERVICE_ACCOUNT_KEY_FILE="$HOME/service_account.json" # Path points to the user's home directory
+
+# The service account key file should be in the root of the project directory.
+# This allows it to be packaged with the Cloud Function for deployment.
+SERVICE_ACCOUNT_KEY_FILE="../service_account.json"
 
 # --- Virtual Environment Setup ---
 if [ ! -d ".venv/python3.12" ]; then
@@ -121,17 +132,43 @@ echo "Activating environment './venv/python3.12'..."
 # Ensure dependencies are installed/updated every time the script is sourced.
 # This prevents ModuleNotFoundError if requirements.txt changes after the
 # virtual environment has been created.
-echo "Ensuring dependencies from .scripts/requirements.txt are installed..."
+echo "Ensuring dependencies from requirements.txt are installed..."
  # Use the full path to the venv pip to ensure we're installing in the correct environment.
-./.venv/python3.12/bin/pip install -r .scripts/requirements.txt > /dev/null
+./.venv/python3.12/bin/pip install -r requirements.txt > /dev/null
 
 if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
   echo "Service account key found. Exporting GOOGLE_APPLICATION_CREDENTIALS."
   export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_KEY_FILE"
 else
-  echo "Error: Service account key file not found at '$SERVICE_ACCOUNT_KEY_FILE'"
-  echo "Please place 'service_account.json' in your home directory ($HOME) or update the path in configure.sh."
+  echo "Error: Service account key file not found at '$PWD/$SERVICE_ACCOUNT_KEY_FILE'"
+  echo "Please place 'service_account.json' in your project's root directory or update the path in configure.sh."
 fi
+
+# --- Create .env file for python-dotenv ---
+# This allows local development tools (like the functions-framework) to load
+# environment variables without needing to source this script every time.
+ENV_FILE=".env"
+echo "Creating/updating ${ENV_FILE} for local development..."
+
+# Use a temporary file to avoid issues, then move it into place.
+TEMP_ENV_FILE=$(mktemp)
+
+{
+  echo "PROJECT_ID=${PROJECT_ID}"
+  echo "FUNCTION_SERVICE_ACCOUNT=${FUNCTION_SERVICE_ACCOUNT}"
+  echo "REGION=${REGION}"
+  echo "LOG_NAME=${LOG_NAME}"
+  echo "DRIVE_SHARE_EMAIL=${DRIVE_SHARE_EMAIL}"
+  echo "GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME}"
+  echo "JUDGEMENT_MODEL_NAME=${JUDGEMENT_MODEL_NAME}"
+  echo "EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME}"
+  echo "SOURCE_GCS_BUCKET=${SOURCE_GCS_BUCKET}"
+  echo "STAGING_GCS_BUCKET=${STAGING_GCS_BUCKET}"
+  echo "INDEX_DISPLAY_NAME=${INDEX_DISPLAY_NAME}"
+  echo "INDEX_ENDPOINT_DISPLAY_NAME=${INDEX_ENDPOINT_DISPLAY_NAME}"
+  echo "GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}"
+} > "$TEMP_ENV_FILE"
+mv "$TEMP_ENV_FILE" "$ENV_FILE"
 
 # This POSIX-compliant check ensures the script is sourced, not executed.
 # (return 0 2>/dev/null) will succeed if sourced and fail if executed.

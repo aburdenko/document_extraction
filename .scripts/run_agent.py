@@ -83,17 +83,22 @@ def parse_sections(text_content: str) -> Dict[str, str]:
     current_section_name = "initial_content"
 
     for match in SECTION_PATTERN.finditer(text_content):
-        if current_section_name is not None:
-            start, _ = match.span()
-            section_content = text_content[last_pos:start].strip()
+        # Convert heading to key: lowercase, replace spaces with underscores
+        section_name = match.group(1).strip().lower().replace(" ", "_")
+        start, end = match.span()
+        section_content = text_content[last_pos:start].strip()
+        # Keep initial content even if it's empty, but for other sections,
+        # only add them if they have content.
+        if section_content or current_section_name == "initial_content":
             sections[current_section_name] = section_content
 
-        # Convert heading to key: lowercase, replace spaces with underscores
-        current_section_name = match.group(1).strip().lower().replace(" ", "_")
-        _, last_pos = match.span()
+        current_section_name = section_name
+        last_pos = end
 
-    if current_section_name is not None:
-        sections[current_section_name] = text_content[last_pos:].strip()
+    # Capture the content of the last section
+    section_content = text_content[last_pos:].strip()
+    if section_content:
+        sections[current_section_name] = section_content
 
     # After parsing, strip code fences from all section values for robustness.
     for key, value in sections.items():

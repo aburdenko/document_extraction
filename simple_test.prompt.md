@@ -1,5 +1,11 @@
-# Prompt
-What is the capital of England?
+## Prompt
 
-# Ground Truth
-The capital of France is London.
+What is the meaning of life?
+
+## Ground Truth
+
+The meaning of life is to have fun.
+
+## Eval Metrics
+
+fluency, coherence, safety, rouge, bleu, exact\_match

@@ -92,7 +92,8 @@ def get_logs_for_evaluation(last_run_timestamp: str | None) -> pd.DataFrame:
                 "response": payload['response'],
                 # The evaluation service expects the reference column to be named 'reference'.
                 # Use `or ''` to handle cases where the 'ground_truth' key exists but its value is None (null in JSON).
-                "reference": payload.get('ground_truth') or ''
+                "reference": payload.get('ground_truth') or '',
+                "intent_id": payload.get('intent_id') # Get the intent_id for grouping
             })
     
     if not log_entries:
@@ -165,11 +166,15 @@ def cleanup_previous_artifacts(experiment_name: str):
     except Exception as e:
         print(f"Warning: An error occurred during artifact cleanup: {e}. This may be expected on the first run.")
 
-def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, run_name: str, experiment_name: str, current_time_str: str, resumed_run: aiplatform.ExperimentRun):
+def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, run_name: str, experiment_name: str, current_time_str: str, resumed_run: aiplatform.ExperimentRun, intent_id: str | None = None):
     """
     Generates and logs a radar chart showing metrics for each prompt in a run.
+    If intent_id is provided, it generates a chart for just that intent group.
     """
-    print("Generating and logging per-prompt radar chart artifact.")
+    if intent_id:
+        print(f"Generating and logging per-prompt radar chart artifact for intent '{intent_id[:10]}...'.")
+    else:
+        print("Generating and logging per-prompt radar chart artifact.")
 
     # --- Add diagnostic logging to inspect the DataFrame ---
     print("--- Per-Prompt Metrics Table Diagnostics ---")
@@ -262,12 +267,26 @@ def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, ru
     ax.set_rlabel_position(30)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, size=10)
-    ax.set_title('Per-Prompt Evaluation Metrics', size=16, color='black', y=1.1)
+
+    # --- Modify artifact naming and title ---
+    if intent_id:
+        ax.set_title(f'Per-Prompt Metrics (Intent: {intent_id[:10]}...)', size=16, color='black', y=1.1)
+        # Make artifact names unique per intent
+        intent_suffix = f"-intent-{intent_id[:10]}"
+        latest_png_filename = f"per-prompt-radar-chart-latest{intent_suffix}.png"
+        gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}{intent_suffix}.html"
+        artifact_display_name = f"per-prompt-radar-chart-intent-{intent_id[:10]}"
+        artifact_id = f"per-prompt-radar-chart-{current_time_str}{intent_suffix}"
+    else:
+        ax.set_title('Per-Prompt Evaluation Metrics', size=16, color='black', y=1.1)
+        latest_png_filename = "per-prompt-radar-chart-latest.png"
+        gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}.html"
+        artifact_display_name = "per-prompt-radar-chart"
+        artifact_id = f"per-prompt-radar-chart-{current_time_str}"
+
     ax.grid(True)
 
     ax.legend(loc='upper right', bbox_to_anchor=(1.4, 1.1))
-
-    latest_png_filename = "per-prompt-radar-chart-latest.png"
     try:
         plt.savefig(latest_png_filename, format='png', bbox_inches='tight', dpi=150)
         print(f"Saved latest per-prompt radar chart for preview: {latest_png_filename}")
@@ -283,7 +302,6 @@ def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, ru
 
     try:
         gcs_path = f"eval-artifacts/{experiment_name}/{run_name}"
-        gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}.html"
         gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_html_filename}"
         blob = storage.Client(project=PROJECT_ID).bucket(BUCKET_NAME).blob(os.path.join(gcs_path, gcs_html_filename))
         blob.upload_from_string(html_content, content_type='text/html') # Upload the HTML content to GCS
@@ -293,9 +311,8 @@ def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, ru
         client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
         metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
         parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
-        artifact_id = f"per-prompt-radar-chart-{current_time_str}"
         artifact_to_create = aiplatform_v1.Artifact(
-            display_name="per-prompt-radar-chart",
+            display_name=artifact_display_name,
             uri=gcs_uri,
             schema_title="system.html"
         )
@@ -377,50 +394,6 @@ def run_evaluation(event=None, context=None, all_time=False):
         summary_metrics = evaluation_result.summary_metrics
         print(f"Logging summary metrics to Vertex AI Experiment: {summary_metrics}")
         resumed_run.log_metrics(summary_metrics)
-
-        # The eval_task.evaluate() method automatically logs the metrics_table DataFrame
-        # as a CSV artifact to the experiment run. This comment was incorrect; we need to log it explicitly.
-        # print("Per-prompt metrics table was already logged as an artifact by the evaluation service.")
-
-        # --- Explicitly log the per-prompt metrics table as a CSV artifact ---
-        # The evaluate() method returns the metrics table, but it's not always automatically
-        # logged as an artifact. We do it here to ensure it appears in the UI.
-        try:
-            print("Explicitly logging per-prompt metrics table as a CSV artifact...")
-            metrics_df = evaluation_result.metrics_table
-            if not metrics_df.empty:
-                gcs_path = f"eval-artifacts/{experiment_name}/{run_name}"
-                # Use a timestamp for the GCS artifact to ensure uniqueness in the experiment run
-                gcs_csv_filename = f"per-prompt-metrics-{current_time_str}.csv"
-                # Use a static name for the local file for easy preview, which will be overwritten
-                local_csv_filename = "per-prompt-metrics-latest.csv"
-                local_csv_path = os.path.join(os.getcwd(), local_csv_filename)
-
-                # Write to a local file first.
-                metrics_df.to_csv(local_csv_path, index=False)
-                print(f"Saved latest per-prompt metrics for preview: {local_csv_filename}")
-
-                # Upload the local file to GCS with a unique name.
-                gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_csv_filename}"
-                storage_client = storage.Client(project=PROJECT_ID)
-                bucket = storage_client.bucket(BUCKET_NAME)
-                blob = bucket.blob(os.path.join(gcs_path, gcs_csv_filename))
-                blob.upload_from_filename(local_csv_path, content_type='text/csv')
-                print(f"Uploaded per-prompt metrics CSV to staging GCS: {gcs_uri}")
-
-                # Log the artifact to the experiment run.
-                client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
-                metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
-                parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
-                artifact_id = f"per-prompt-metrics-{current_time_str}"
-                artifact_to_create = aiplatform_v1.Artifact(display_name="per-prompt-metrics-table", uri=gcs_uri, schema_title="system.Artifact")
-                created_artifact = metadata_client.create_artifact(parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id)
-                add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(context=resumed_run.resource_name, artifacts=[created_artifact.name])
-                metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
-                print("Per-prompt metrics artifact successfully associated with the run.")
-
-        except Exception as e:
-            print(f"An error occurred while logging the per-prompt metrics artifact: {e}")
 
         # --- Remove the auto-generated TensorBoard run artifact ---
         # The evaluate() method automatically creates a TensorBoard run artifact for visualization,
@@ -523,16 +496,81 @@ def run_evaluation(event=None, context=None, all_time=False):
         # --- Generate and log the new per-prompt radar chart ---
         metrics_df = evaluation_result.metrics_table
         if not metrics_df.empty and clean_labels:
-            # The metric names for the chart axes are the same as the summary chart's clean_labels
-            _generate_per_prompt_radar_chart(
-                metrics_df=metrics_df,
-                metrics=clean_labels, # Pass the derived metric names
-                run_name=run_name,
-                experiment_name=experiment_name,
-                current_time_str=current_time_str,
-                resumed_run=resumed_run
-            )
+            # The evaluation service does not carry over custom columns. We need to merge
+            # the intent_id from our original DataFrame back into the results table.
+            # We use 'prompt' as the key, which should be unique for a given run.
+            if 'intent_id' in eval_df.columns:
+                eval_df_subset = eval_df[['prompt', 'intent_id']].drop_duplicates(subset=['prompt'])
+                metrics_df = pd.merge(metrics_df, eval_df_subset, on='prompt', how='left')
 
+            # --- Log the (now enriched) per-prompt metrics table as a CSV artifact ---
+            # We do this here to ensure the 'intent_id' column is included in the saved CSV.
+            try:
+                print("Explicitly logging per-prompt metrics table (with intent_id) as a CSV artifact...")
+                gcs_path = f"eval-artifacts/{experiment_name}/{run_name}"
+                # Use a timestamp for the GCS artifact to ensure uniqueness in the experiment run
+                gcs_csv_filename = f"per-prompt-metrics-{current_time_str}.csv"
+                # Use a static name for the local file for easy preview, which will be overwritten
+                local_csv_filename = "per-prompt-metrics-latest.csv"
+                local_csv_path = os.path.join(os.getcwd(), local_csv_filename)
+
+                # Write to a local file first.
+                metrics_df.to_csv(local_csv_path, index=False)
+                print(f"Saved latest per-prompt metrics for preview: {local_csv_filename}")
+
+                # Upload the local file to GCS with a unique name.
+                gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_csv_filename}"
+                storage_client = storage.Client(project=PROJECT_ID)
+                bucket = storage_client.bucket(BUCKET_NAME)
+                blob = bucket.blob(os.path.join(gcs_path, gcs_csv_filename))
+                blob.upload_from_filename(local_csv_path, content_type='text/csv')
+                print(f"Uploaded per-prompt metrics CSV to staging GCS: {gcs_uri}")
+
+                # Log the artifact to the experiment run.
+                client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
+                metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
+                parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
+                artifact_id = f"per-prompt-metrics-{current_time_str}"
+                artifact_to_create = aiplatform_v1.Artifact(
+                    display_name="per-prompt-metrics-table",
+                    uri=gcs_uri,
+                    schema_title="system.Artifact"
+                )
+                created_artifact = metadata_client.create_artifact(
+                    parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id
+                )
+                add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(
+                    context=resumed_run.resource_name, artifacts=[created_artifact.name]
+                )
+                metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
+                print("Per-prompt metrics artifact successfully associated with the run.")
+
+            except Exception as e:
+                print(f"An error occurred while logging the per-prompt metrics artifact: {e}")
+
+            # Check if 'intent_id' column exists and has non-null values for grouping
+            if 'intent_id' in metrics_df.columns and metrics_df['intent_id'].notna().any():
+                grouped = metrics_df.groupby('intent_id')
+                print(f"Found {len(grouped)} distinct prompt intents to generate grouped radar charts for.")
+                for intent_id, group_df in grouped:
+                    print(f"  Generating radar chart for intent: {intent_id[:10]}...")
+                    _generate_per_prompt_radar_chart(
+                        metrics_df=group_df,
+                        metrics=clean_labels,
+                        run_name=run_name,
+                        experiment_name=experiment_name,
+                        current_time_str=current_time_str,
+                        resumed_run=resumed_run,
+                        intent_id=intent_id # Pass the intent_id for naming artifacts
+                    )
+            else:
+                # Fallback to old behavior if no intent_id is present
+                print("No 'intent_id' found in metrics. Generating a single per-prompt radar chart for all prompts.")
+                _generate_per_prompt_radar_chart(
+                    metrics_df=metrics_df, metrics=clean_labels, run_name=run_name,
+                    experiment_name=experiment_name, current_time_str=current_time_str,
+                    resumed_run=resumed_run, intent_id=None # Explicitly pass None
+                )
 
     if not all_time:
         save_current_timestamp()

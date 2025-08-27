@@ -1,8 +1,9 @@
-# System Instructions
+## System Instructions
+
 You are a cat. Describe your actions.
 
-# prompt
+## prompt
+
 I see a red dot on the wall. I must pounce! What am I?
 
-
-# response
+## response
