@@ -66,6 +66,9 @@ MODEL_PRICING = {
     "gemini-1.5-flash-latest": {"input": 0.000125, "output": 0.000375},
     "gemini-1.5-pro": {"input": 0.00125, "output": 0.00375},
     "gemini-1.5-pro-latest": {"input": 0.00125, "output": 0.00375},
+    # NOTE: Placeholder pricing for 2.5 models based on 1.5 series. Update when official pricing is available.
+    "gemini-2.5-pro": {"input": 0.00125, "output": 0.00375},
+    "gemini-2.5-flash": {"input": 0.000125, "output": 0.000375},
     # Add other models here as they are used.
 }
 # --- End Model Pricing ---
@@ -656,8 +659,32 @@ def run_evaluation_on_dataframe(eval_df: pd.DataFrame, metrics_to_run: List[str]
         logger.error(f"    Error during on-demand evaluation: {e}", exc_info=True)
         return None
 
+
+# --- Retry Helper for API calls ---
+def generate_with_retry(model: "GenerativeModel", *args, **kwargs) -> Any:
+    """Calls model.generate_content with retry logic for ResourceExhausted errors."""
+    from google.api_core import exceptions
+    import random
+
+    max_retries = 5
+    base_delay = 2  # seconds
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(*args, **kwargs)
+        except exceptions.ResourceExhausted as e:
+            if attempt < max_retries - 1:
+                # Exponential backoff with jitter
+                wait_time = (base_delay ** attempt) + (random.uniform(0, 1))
+                logger.warning(f"    ResourceExhausted error (429). Retrying in {wait_time:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"    API call failed after {max_retries} retries due to ResourceExhausted error.")
+                raise e # Re-raise the exception after the final attempt
+# --- End Retry Helper ---
+
 def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bool):
     """Processes a single prompt file and calls the Gemini API."""
+    model_name = None  # Initialize to ensure it's available in the except block
     try:
         total_cost = 0.0 # Initialize total cost
         # Generate a unique ID for this entire request (primary + potential explanation call)
@@ -697,7 +724,9 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
                  user_prompt = sections.get('initial_content')
             else:
                  logger.error("    Could not find a '# Prompt' section or suitable fallback content.")
-                 output_filename = filepath.with_name(f"{filepath.stem}.{model_name}.output.md")
+                 # model_name is not yet determined, so use a fallback for the error file.
+                 model_name_for_error = metadata.get('model_name') or os.getenv('GEMINI_MODEL_NAME', 'unknown-model')
+                 output_filename = filepath.with_name(f"{filepath.stem}.{model_name_for_error}.output.md")
                  output_filename.write_text(f"# Gemini Output for: {filepath.name}\n\n---\n\nPROCESSING ERROR\nDetails: No '# Prompt' section found and no fallback content available.")
                  return
 
@@ -898,11 +927,11 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
             all_tools.append(rag_tool)
 
         start_time_primary = time.monotonic()
-        response = model.generate_content(
+        response = generate_with_retry(
+            model,
             user_prompt,
             generation_config=generation_config,
             tools=all_tools if all_tools else None
-            # Safety settings moved to model initialization
         )
         duration_primary = time.monotonic() - start_time_primary
         logger.info(f"    Primary API call complete in {duration_primary:.2f} seconds.")
@@ -1329,7 +1358,8 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
         # Enhanced error logging to provide a full traceback in the console
         logger.error(f"An unexpected error occurred during processing of '{prompt_filepath}'.", exc_info=True)
         filepath = Path(prompt_filepath)
-        model_name_for_error = os.getenv('GEMINI_MODEL_NAME', 'unknown-model')
+        # Use the model_name determined in the try block if available, otherwise fall back.
+        model_name_for_error = model_name or os.getenv('GEMINI_MODEL_NAME', 'unknown-model')
         output_filename = filepath.with_name(f"{filepath.stem}.{model_name_for_error}.output.md")
         # Write a more informative error message to the output file
         error_content = (
