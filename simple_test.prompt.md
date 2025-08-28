@@ -1,6 +1,6 @@
 ## Prompt
 
-What is the meaning of life?
+What is the meaning of life, given that we live only 80 years and most people live lives of quiet desperation?
 
 ## Ground Truth
 

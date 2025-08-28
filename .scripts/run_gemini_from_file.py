@@ -31,6 +31,7 @@ from vertexai.generative_models import Part, GenerationConfig, HarmCategory, Har
 
 # They are kept here for reference but are no longer used in the primary RAG path.
 from google.cloud import aiplatform
+from google.cloud import aiplatform_v1
 from google.cloud import logging as cloud_logging
 from google.cloud.logging.handlers import setup_logging
 from google.cloud import storage
@@ -62,11 +63,11 @@ CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
 # --- Model Pricing (per 1,000 tokens) ---
 # Prices as of mid-2024 from https://cloud.google.com/vertex-ai/generative-ai/pricing
 MODEL_PRICING = {
-    # Gemini 2.5 Models
-    "gemini-2.5-flash": {"input": 0.00030, "output": 0.001},
-    "gemini-2.5-flash-latest": {"input": 0.00030, "output": 0.001},
-    "gemini-2.5-pro": {"input": 0.00125, "output": 0.01},
-    "gemini-2.5-pro-latest": {"input": 0.00125, "output": 0.01},
+    # Gemini 1.5 Models
+    "gemini-1.5-flash": {"input": 0.000125, "output": 0.000375},
+    "gemini-1.5-flash-latest": {"input": 0.000125, "output": 0.000375},
+    "gemini-1.5-pro": {"input": 0.00125, "output": 0.00375},
+    "gemini-1.5-pro-latest": {"input": 0.00125, "output": 0.00375},
     # Add other models here as they are used.
 }
 # --- End Model Pricing ---
@@ -564,27 +565,34 @@ def _generate_and_log_radar_chart(summary_metrics: dict, run_name: str, resumed_
 
     try:
         pic_io = io.BytesIO()
-        plt.savefig(pic_io, format='png', bbox_inches='tight', dpi=150)
+        plt.savefig(pic_io, format='png', bbox_inches='tight', dpi=150) # Save to buffer
         plt.close(fig)
         pic_io.seek(0)
+        base64_png = base64.b64encode(pic_io.getvalue()).decode('utf-8')
+        html_content = f'<img src="data:image/png;base64,{base64_png}" />'
 
         current_time_str = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
         gcs_path = f"eval-artifacts/{EXPERIMENT_NAME}/{run_name}"
-        gcs_filename = f"summary-radar-chart-{current_time_str}.png"
+        gcs_filename = f"summary-radar-chart-{current_time_str}.html"
         gcs_uri = f"gs://{BUCKET_NAME}/{gcs_path}/{gcs_filename}"
         
         storage_client = storage.Client(project=PROJECT_ID)
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(os.path.join(gcs_path, gcs_filename))
-        blob.upload_from_file(pic_io, content_type='image/png', rewind=True)
-        logger.info(f"    Uploaded summary chart to GCS: {gcs_uri}")
+        blob.upload_from_string(html_content, content_type='text/html')
+        logger.info(f"    Uploaded summary chart HTML to GCS: {gcs_uri}")
 
-        resumed_run.log_artifact(gcs_uri, artifact_display_name="summary-radar-chart")
+        # --- Use GAPIC client to log artifact ---
+        client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
+        metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
+        parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
+        artifact_id = f"summary-radar-chart-{current_time_str}"
+        artifact_to_create = aiplatform_v1.Artifact(display_name=f"summary-radar-chart-{current_time_str}", uri=gcs_uri, schema_title="system.Artifact")
+        created_artifact = metadata_client.create_artifact(parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id)
+        add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(context=resumed_run.resource_name, artifacts=[created_artifact.name])
+        metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
+        logger.info("    Successfully logged radar chart artifact to experiment run.")
 
-        pic_io.seek(0)
-        base64_png = base64.b64encode(pic_io.getvalue()).decode('utf-8')
-        html_content = f'<img src="data:image/png;base64,{base64_png}" />'
-        
         return html_content, gcs_uri
 
     except Exception as e:
@@ -611,7 +619,21 @@ def _log_metrics_csv_artifact(metrics_df: pd.DataFrame, run_name: str, resumed_r
         blob.upload_from_string(metrics_df.to_csv(index=False), 'text/csv')
         logger.info(f"    Uploaded metrics CSV to GCS: {gcs_uri}")
 
-        resumed_run.log_artifact(gcs_uri, artifact_display_name="per-prompt-metrics-table")
+        # --- Use GAPIC client to log artifact ---
+        client_options = {"api_endpoint": f"{LOCATION}-aiplatform.googleapis.com"}
+        metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
+
+        parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
+        artifact_id = f"per-prompt-metrics-table-{current_time_str}"
+
+        artifact_to_create = aiplatform_v1.Artifact(
+            display_name="per-prompt-metrics-table",
+            uri=gcs_uri,
+            schema_title="system.Artifact"
+        )
+        created_artifact = metadata_client.create_artifact(parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id)
+        add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(context=resumed_run.resource_name, artifacts=[created_artifact.name])
+        metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
         logger.info("    Successfully logged CSV artifact to experiment run.")
     except Exception as e:
         logger.error(f"    Failed to log metrics CSV artifact: {e}", exc_info=True)
