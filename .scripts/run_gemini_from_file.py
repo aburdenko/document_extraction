@@ -54,9 +54,7 @@ EXPERIMENT_NAME = "gemini-playground-evaluation" # Used for GCS artifact path
 # Regex to find sections like # System Instructions, # Prompt, etc.
 SECTION_PATTERN = re.compile(r"^\s*#+\s+([\w\s]+)\s*$", re.MULTILINE)
 RAG_ENGINE_SECTION_KEY = "ragengine"
-SUPPORTED_ON_DEMAND_METRICS = [
-    "fluency", "coherence", "safety", "rouge", "bleu", "exact_match"
-]
+SUPPORTED_ON_DEMAND_METRICS = ["fluency", "coherence", "safety", "rouge"]
 # --- Define the key we expect for the schema section ---
 CONTROLLED_OUTPUT_SECTION_KEY = "controlled_output_schema" # Use this constant
 
@@ -1287,15 +1285,29 @@ def call_gemini_with_prompt_file(prompt_filepath: str, cloud_logging_enabled: bo
                         resumed_run.log_metrics(summary_metrics)
                         logger.info(f"    Logged summary metrics: {summary_metrics}")
 
-                        _log_metrics_csv_artifact(evaluation_result.metrics_table, run_name, resumed_run)
+                        metrics_table_df = evaluation_result.metrics_table
+                        _log_metrics_csv_artifact(metrics_table_df, run_name, resumed_run)
                         html_chart, gcs_uri = _generate_and_log_radar_chart(summary_metrics, run_name, resumed_run)
 
                         eval_output_section = "\n\n## Eval Output\n\n"
                         if html_chart:
                             eval_output_section += f"{html_chart}\n"
                         
-                        run_url = f"https://console.cloud.google.com/vertex-ai/locations/{LOCATION}/experiments/experiments/{EXPERIMENT_NAME}/runs/{run_name}?project={PROJECT_ID}"
-                        eval_output_section += f"\nView full evaluation results in Vertex AI Experiments\n"
+                        # Add summary metrics table to output
+                        if summary_metrics:
+                            eval_output_section += "\n### Summary Metrics\n\n"
+                            eval_output_section += "| Metric | Value |\n"
+                            eval_output_section += "|--------|-------|\n"
+                            for key, value in summary_metrics.items():
+                                if isinstance(value, (float, np.floating)):
+                                    value_str = f"{value:.4f}"
+                                else:
+                                    value_str = str(value)
+                                eval_output_section += f"| `{key}` | `{value_str}` |\n"
+                            eval_output_section += "\n"
+
+                        run_url = f"https://console.cloud.google.com/vertex-ai/experiments/locations/{LOCATION}/experiments/{EXPERIMENT_NAME}/runs/{run_name}/charts?project={PROJECT_ID}"
+                        eval_output_section += f"\nView full evaluation results in Vertex AI Experiments\n\n"
 
                 except Exception as e:
                     logger.error(f"    Failed to run evaluation or log artifacts: {e}", exc_info=True)

@@ -110,20 +110,29 @@ def cleanup_previous_artifacts(experiment_name: str):
     """
     try:
         print("--- Starting cleanup of previous evaluation artifacts (Metadata & GCS) ---")
-        # Use the static list method on ExperimentRun, which is more stable across SDK versions.
+        
+        # Step 1: Get the unsorted list of runs.
         runs = aiplatform.ExperimentRun.list(experiment=experiment_name)
 
         if len(runs) <= 1:
             print("No previous runs found to clean up.")
             return
 
-        # Sort runs by creation time, descending, to find the latest.
-        runs.sort(key=lambda r: r.create_time, reverse=True)
+        # Step 2: Sort the runs manually based on the timestamp in their name.
+        # This is robust against different SDK versions.
+        def get_sort_key_from_name(run):
+            # Extracts the timestamp string like '20250828-123456' from 'eval-run-20250828-123456'
+            match = re.search(r'(\d{8}-\d{6})', run.name)
+            # Return the timestamp if found, otherwise return a default string that sorts last.
+            return match.group(1) if match else "00000000-000000"
+
+        runs.sort(key=get_sort_key_from_name, reverse=True)
         
         latest_run = runs[0]
         previous_runs = runs[1:]
         
-        print(f"Keeping artifacts for latest run: '{latest_run.name}' (created at {latest_run.create_time}).")
+        latest_run_time_str = get_sort_key_from_name(latest_run)
+        print(f"Keeping artifacts for latest run: '{latest_run.name}' (time parsed from name: {latest_run_time_str}).")
         print(f"Found {len(previous_runs)} previous runs to clean up artifacts from.")
 
         storage_client = storage.Client(project=PROJECT_ID)
@@ -135,7 +144,7 @@ def cleanup_previous_artifacts(experiment_name: str):
                 # Find artifacts by their display name
                 if (artifact.display_name.startswith("radar-chart-") or
                     artifact.display_name == "per-prompt-metrics-table" or
-                    artifact.display_name == "per-prompt-radar-chart"):
+                    artifact.display_name.startswith("per-prompt-radar-chart")):
                     artifacts_to_delete.append(artifact)
             if not artifacts_to_delete:
                 print(f"    No matching artifacts found in run '{run.name}'.")
@@ -275,13 +284,13 @@ def _generate_per_prompt_radar_chart(metrics_df: pd.DataFrame, metrics: list, ru
         intent_suffix = f"-intent-{intent_id[:10]}"
         latest_png_filename = f"per-prompt-radar-chart-latest{intent_suffix}.png"
         gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}{intent_suffix}.html"
-        artifact_display_name = f"per-prompt-radar-chart-intent-{intent_id[:10]}"
+        artifact_display_name = f"per-prompt-radar-chart-intent-{intent_id[:10]}-{current_time_str}"
         artifact_id = f"per-prompt-radar-chart-{current_time_str}{intent_suffix}"
     else:
         ax.set_title('Per-Prompt Evaluation Metrics', size=16, color='black', y=1.1)
         latest_png_filename = "per-prompt-radar-chart-latest.png"
         gcs_html_filename = f"per-prompt-radar-chart-{current_time_str}.html"
-        artifact_display_name = "per-prompt-radar-chart"
+        artifact_display_name = f"per-prompt-radar-chart-{current_time_str}"
         artifact_id = f"per-prompt-radar-chart-{current_time_str}"
 
     ax.grid(True)
@@ -482,7 +491,9 @@ def run_evaluation(event=None, context=None, all_time=False):
                 metadata_client = aiplatform_v1.MetadataServiceClient(client_options=client_options)
                 parent_store = "/".join(resumed_run.resource_name.split('/')[:-2])
                 artifact_id = f"radar-chart-{current_time_str}"
+                
                 artifact_to_create = aiplatform_v1.Artifact(display_name=f"radar-chart-{current_time_str}", uri=gcs_uri, schema_title="system.html")
+
                 created_artifact = metadata_client.create_artifact(parent=parent_store, artifact=artifact_to_create, artifact_id=artifact_id)
                 add_artifacts_request = aiplatform_v1.AddContextArtifactsAndExecutionsRequest(context=resumed_run.resource_name, artifacts=[created_artifact.name])
                 metadata_client.add_context_artifacts_and_executions(request=add_artifacts_request)
@@ -577,7 +588,6 @@ def run_evaluation(event=None, context=None, all_time=False):
         print("Script finished. The last run timestamp has been updated.")
     else:
         print("Script finished. --all-time mode: last run timestamp was not updated.")
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run evaluation on Gemini prompt outputs logged in Cloud Logging.")
     parser.add_argument(

@@ -140,12 +140,12 @@ def cleanup_previous_artifacts(experiment_name: str):
             return
 
         # Sort runs by creation time, descending, to find the latest.
-        runs.sort(key=lambda r: r.create_time, reverse=True)
+        runs.sort(key=lambda r: r.start_time, reverse=True)
         
         latest_run = runs[0]
         previous_runs = runs[1:]
         
-        print(f"Keeping artifacts for latest run: '{latest_run.name}' (created at {latest_run.create_time}).")
+        print(f"Keeping artifacts for latest run: '{latest_run.name}' (started at {latest_run.start_time}).")
         print(f"Found {len(previous_runs)} previous runs to clean up artifacts from.")
 
         storage_client = storage.Client(project=PROJECT_ID)
