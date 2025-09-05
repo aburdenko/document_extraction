@@ -1,5 +1,24 @@
 // In your .vscode/settings.json or global settings.json
-{
+{ // These settings configure the VS Code terminal to automatically
+    // source the project's environment configuration script on startup.
+    "terminal.integrated.profiles.linux": {
+        "Project Bash": {
+            "path": "bash",
+            // This tells bash to run our custom init script instead of the default ~/.bashrc.
+            // Our script then sources ~/.bashrc itself, so you don't lose your standard setup.
+            "args": [
+                "--init-file",
+                "${workspaceFolder}/.vscode/terminal_init.sh"
+            ]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "Project Bash",
+    // --- Recommended Python Settings ---
+    // Point to the project's virtual environment interpreter.
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/python3.12/bin/python",
+    // We handle venv activation in our terminal_init.sh, so we disable the default activator
+    // to prevent it from running twice.
+    "python.terminal.activateEnvironment": false,
     // Specific configuration for an extension like "Run on Save" (by emeraldwalk)
     "emeraldwalk.runonsave": {
         "commands": [

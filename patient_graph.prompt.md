@@ -6,7 +6,10 @@ Your task is to analyze the provided clinical text for a single patient and tran
 
 ## Metadata
 
-Temperature: 0  
+Model: gemini-2.5-flash
+
+Temperature: 0  
+
 Log Probs: 5
 
 The JSON graph must have two top-level keys: "nodes" and "edges".
@@ -108,3 +111,7 @@ projects/kallogjeri-project-345114/locations/us-central1/ragCorpora/345876451382
   "required": ["nodes", "edges"]
 }
 ```
+
+## Eval Metrics
+
+fluency, coherence, safety, rouge, bleu, exact\_match

@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import vertexai
 from vertexai.preview import rag
@@ -20,6 +20,8 @@ from google.cloud.logging.handlers import setup_logging
 
 # Import our defined tools
 from agent_tools import get_todays_date
+# Import shared evaluation utilities
+from eval_utils import run_on_demand_evaluation
 
 # --- Constants and Config ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s', stream=sys.stderr)
@@ -27,8 +29,15 @@ logger = logging.getLogger(__name__)
 
 MAX_AGENT_STEPS = 10 # Prevent infinite loops
 
-# Regex to find sections like # Name, # Instruction, etc.
-SECTION_PATTERN = re.compile(r"^\s*#+\s+([\w\s]+)\s*$", re.MULTILINE)
+# Regex to find sections like # Name, # Instruction, etc. Handles multiple hashes,
+# optional space after hashes, and hyphens in the name. It correctly limits
+# the heading to a single line.
+SECTION_PATTERN = re.compile(r"^\s*#+\s*([\w -]+)\s*$", re.MULTILINE)
+
+# --- Project Configuration (from environment) ---
+PROJECT_ID = os.environ.get("PROJECT_ID", "your-gcp-project-id")
+LOCATION = os.environ.get("REGION", "us-central1")
+SUPPORTED_ON_DEMAND_METRICS = ["fluency", "coherence", "safety", "rouge"]
 
 # --- Tool and Logging Setup ---
 AVAILABLE_TOOLS = {
@@ -72,14 +81,14 @@ class AgentLogger:
         full_payload.update(payload)
         log_to_cloud(full_payload)
 
-def parse_sections(text_content: str) -> Dict[str, str]:
+def parse_sections(text_content: str) -> Tuple[Dict[str, str], Optional[List[str]]]:
     """
-    Parses the text content into sections based on headings and strips
-    markdown code fences from each section's content.
+    Parses the text content into sections based on headings, strips
+    markdown code fences, and extracts on-demand evaluation metrics.
     """
     sections: Dict[str, str] = {}
     last_pos = 0
-    # Content before the first heading is captured as 'initial_content'.
+    # Content before the first heading is captured as 'initial_content'
     current_section_name = "initial_content"
 
     for match in SECTION_PATTERN.finditer(text_content):
@@ -87,18 +96,17 @@ def parse_sections(text_content: str) -> Dict[str, str]:
         section_name = match.group(1).strip().lower().replace(" ", "_")
         start, end = match.span()
         section_content = text_content[last_pos:start].strip()
-        # Keep initial content even if it's empty, but for other sections,
-        # only add them if they have content.
-        if section_content or current_section_name == "initial_content":
-            sections[current_section_name] = section_content
+        # Always add the section for the previous heading. This ensures that
+        # even empty sections are recorded in the dictionary, which is crucial
+        # for later logic that checks for the presence of a section.
+        sections[current_section_name] = section_content
 
         current_section_name = section_name
         last_pos = end
 
     # Capture the content of the last section
     section_content = text_content[last_pos:].strip()
-    if section_content:
-        sections[current_section_name] = section_content
+    sections[current_section_name] = section_content
 
     # After parsing, strip code fences from all section values for robustness.
     for key, value in sections.items():
@@ -107,17 +115,48 @@ def parse_sections(text_content: str) -> Dict[str, str]:
         stripped_value = re.sub(r"\s*```\s*$", "", stripped_value, flags=re.MULTILINE).strip()
         sections[key] = stripped_value
 
-    return sections
+    # --- Eval Metrics Extraction (adapted from run_gemini_from_file.py) ---
+    eval_metrics_list = None
+    eval_metrics_content = None
+
+    if "eval_metrics" in sections:
+        eval_metrics_content = sections["eval_metrics"]
+    elif "evall_metrics" in sections: # Handle common typo
+        eval_metrics_content = sections["evall_metrics"]
+        logger.warning("    Found section with typo '# Evall Metrics'. Processing it as '# Eval Metrics'.")
+
+    if eval_metrics_content is not None:
+        logger.info("    Found '# Eval Metrics' section.")
+        metrics_str = eval_metrics_content.strip()
+        if metrics_str:
+            # Normalize metric names to be lowercase and correct common errors.
+            raw_metrics = [metric.strip().lower().replace('\\', '') for metric in metrics_str.split(',') if metric.strip()]
+            validated_metrics = []
+            for metric in raw_metrics:
+                if metric == 'rogue':
+                    metric = 'rouge' # Correct common misspelling
+                    logger.info("    Corrected user-provided metric 'rogue' to 'rouge'.")
+                
+                if metric in SUPPORTED_ON_DEMAND_METRICS:
+                    validated_metrics.append(metric)
+                else:
+                    logger.warning(f"    Unsupported metric '{metric}' found in '# Eval Metrics' and will be ignored. Supported metrics are: {SUPPORTED_ON_DEMAND_METRICS}")
+
+            eval_metrics_list = validated_metrics
+            logger.info(f"    Normalized and validated metrics for on-demand evaluation: {eval_metrics_list}")
+
+    return sections, eval_metrics_list
 
 # --- Core Agent Logic ---
 def run_agent(prompt_filepath: str):
     filepath = Path(prompt_filepath)
     session_id = f"agent-session-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     print(f"--- Starting Agent Session: {session_id} for file: {filepath.name} ---")
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
 
     # 1. Parse the task file
     file_content = filepath.read_text()
-    sections = parse_sections(file_content)
+    sections, eval_metrics_list = parse_sections(file_content)
 
     agent_name = sections.get("name", session_id)
     # Prioritize 'instruction', fall back to 'system_instructions', then to a default.
@@ -147,7 +186,7 @@ def run_agent(prompt_filepath: str):
 
     # Code fence stripping is now handled robustly in the parse_sections function.
     # 2. Setup Model and Tools
-    model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-2.5-flash')
+    model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash-latest')
     model = GenerativeModel(
         model_name,
         system_instruction=[system_instruction]
@@ -256,10 +295,25 @@ def run_agent(prompt_filepath: str):
             break # Agent has finished
 
     # 4. Save Output
-    output_filename = filepath.with_name(f"{filepath.stem}.output.md")
+    output_filename = filepath.with_name(f"{filepath.stem}.{model_name}.output.md")
     output_content = f"# Agent Output for: {filepath.name}\n\n"
+    output_content += f"**Model:** {model_name}\n"
     output_content += f"**Instruction:** {system_instruction}\n\n"
     output_content += f"**Final Answer:**\n{final_answer}\n"
+
+    # 5. On-Demand Evaluation & Experiment Logging
+    eval_output_section = ""
+    if eval_metrics_list:
+        eval_output_section = run_on_demand_evaluation(
+            initial_prompt=initial_prompt,
+            final_answer=final_answer,
+            ground_truth=ground_truth,
+            eval_metrics_list=eval_metrics_list,
+            filepath_stem=filepath.stem,
+            run_type="agent-run"
+        )
+
+    output_content += eval_output_section
     output_filename.write_text(output_content)
     print(f"\n--- Agent Session Finished. Output saved to: {output_filename} ---")
 

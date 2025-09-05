@@ -4,8 +4,23 @@ Patient Information Agent (Structured)
 
 ## Instruction
 
-You are a helpful agent. Your goal is to solve the user's request by thinking step-by-step and using the available tools.  
-When you have the final answer, respond directly to the user without calling any more tools
+You are an expert in clinical data processing. Your task is to analyze clinical text for a patient and transform it into a structured JSON graph representation.
+
+The JSON graph must have two top-level keys: "nodes" and "edges".
+
+**Node Creation Rules:**
+1.  **Entities as Nodes:** Each distinct clinical entity (e.g., the Patient, each Condition) must be represented as a node.
+2.  **Node Structure:** Every node must have an "id", "type", and "data" field.
+3.  **Patient Node:** There must be only one "Patient" node.
+
+**Edge Creation Rules:**
+1.  **Relationships as Edges:** Create edges to represent the relationships between nodes.
+2.  **Edge Structure:** Every edge must have a "source", "target", and "label".
+3.  **Connectivity:** All non-patient nodes should connect back to the "Patient" node.
+
+First, use your tools to gather the necessary information. Then, formulate the final answer as a JSON graph.
+
+When you have the final JSON graph, output it inside a single JSON code block and then stop.
 
 ## Tools
 
@@ -22,7 +37,7 @@ When you have the final answer, respond directly to the user without calling any
 
 ## Prompt
 
-Please tell me the current diagnosis for patient ana luis montalvo
+Use your tools to find the current diagnosis for patient "ana luis montalvo", then generate a JSON graph representing the patient and their diagnosis according to your instructions.
 
 ## Ground Truth
 
@@ -55,3 +70,6 @@ Please tell me the current diagnosis for patient ana luis montalvo
   ]
 }
 ```
+
+## Eval Metrics
+final_response_reference_free
