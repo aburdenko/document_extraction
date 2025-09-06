@@ -15,6 +15,9 @@ import argparse
 import logging
 from google.api_core import exceptions as google_exceptions
 import sys
+import os
+from google.cloud import storage
+
 
 import vertexai
 from vertexai.preview import rag
