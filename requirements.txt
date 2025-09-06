@@ -1,6 +1,7 @@
 google-generativeai
 google-cloud-aiplatform
 google-cloud-storage
+google-cloud-documentai
 google-cloud-logging
 requests
 gcsfs
