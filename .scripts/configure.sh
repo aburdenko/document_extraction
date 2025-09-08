@@ -9,23 +9,51 @@ SCRIPT_DIR_CONFIGURE="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && p
 # The service account key file should be in the root of the project directory.
 SERVICE_ACCOUNT_KEY_FILE="$SCRIPT_DIR_CONFIGURE/../../service_account.json"
 
-if [ ! -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
-  echo "Error: Service account key file not found at '$PWD/$SERVICE_ACCOUNT_KEY_FILE'" >&2
-  echo "Please place 'service_account.json' in your project's root directory." >&2
-  return 1
+if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
+  echo "Service account key found. Using it for authentication."
+  export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_KEY_FILE"
+  # Dynamically determine the Project ID from the service account key to prevent mismatches.
+  export PROJECT_ID=$(jq -r .project_id "$SERVICE_ACCOUNT_KEY_FILE")
+else
+  echo "WARNING: Service account key file not found at '$SERVICE_ACCOUNT_KEY_FILE'."
+  echo "Falling back to user-based authentication via gcloud."
+
+  # Unset credentials variable to ensure gcloud ADC is used
+  unset GOOGLE_APPLICATION_CREDENTIALS
+
+  # Prompt user to log in. This will set up Application Default Credentials (ADC).
+  if ! gcloud auth application-default login --no-launch-browser --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform; then
+    echo "ERROR: gcloud auth application-default login failed." >&2
+    return 1
+  fi
+
+  # Try to get project from gcloud config, otherwise prompt the user.
+  CONFIGURED_PROJECT=$(gcloud config get-value project 2>/dev/null)
+  if [ -n "$CONFIGURED_PROJECT" ]; then
+    echo "Using configured gcloud project: $CONFIGURED_PROJECT"
+    export PROJECT_ID=$CONFIGURED_PROJECT
+  else
+    echo "Could not determine gcloud project. Please enter your Google Cloud Project ID:"
+    read -p "Project ID: " GCLOUD_PROJECT_ID
+    if [ -z "$GCLOUD_PROJECT_ID" ]; then
+      echo "ERROR: Project ID is required for user-based authentication." >&2
+      return 1
+    fi
+    export PROJECT_ID=$GCLOUD_PROJECT_ID
+  fi
 fi
 
 # --- Project Configuration ---
 # All project-wide configuration variables are set here.
 # These are used by the various Python scripts in this project.
-# *** FIX ***
-# Dynamically determine the Project ID from the service account key to prevent mismatches.
-# This ensures the project used to build resource names matches the project where
-# operations are executed (determined by the credentials).
-export PROJECT_ID=$(jq -r .project_id "$SERVICE_ACCOUNT_KEY_FILE")
 export GOOGLE_CLOUD_PROJECT=$PROJECT_ID # Also set this common env var for client libraries
+export REGION="us-central1"
 # First, ensure your gcloud CLI is configured with your project ID
 gcloud config set project $PROJECT_ID
+
+# Explicitly set the gcloud compute/region to ensure all gcloud commands and
+# some client libraries default to the correct location.
+gcloud config set compute/region $REGION
 
 # Get your project number
 PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
@@ -34,7 +62,6 @@ PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNum
 # This is set to match the service account used for local testing to ensure consistent permissions.
 export FUNCTION_SERVICE_ACCOUNT="${PROJECT_ID}@appspot.gserviceaccount.com"
 
-export REGION="us-central1"
 export LOG_NAME="extract_pipeline_log"
 
 # --- Document AI Configuration ---
@@ -120,6 +147,29 @@ if [ ! -d ".venv/python3.12" ]; then
   gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectViewer" # Read input
   gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectAdmin" # Write output
 
+  echo "Granting the local service account permission to act as the function's service account..."
+  # The service account from the JSON key needs the 'Service Account User' role
+  # on the service account that the Vertex AI Custom Job will run as.
+  if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
+    LOCAL_RUNNER_SA=$(jq -r .client_email "$SERVICE_ACCOUNT_KEY_FILE")
+    MEMBER="serviceAccount:$LOCAL_RUNNER_SA"
+    echo "Granting 'Service Account User' to SA: $LOCAL_RUNNER_SA"
+  else
+    # If using user credentials, grant the user the role.
+    LOGGED_IN_USER=$(gcloud config get-value account)
+    MEMBER="user:$LOGGED_IN_USER"
+    echo "Granting 'Service Account User' to user: $LOGGED_IN_USER"
+  fi
+  gcloud iam service-accounts add-iam-policy-binding "$FUNCTION_SERVICE_ACCOUNT" \
+    --member="$MEMBER" \
+    --role="roles/iam.serviceAccountUser" \
+    --project="$PROJECT_ID"
+
+  echo "Granting the function's service account the Vertex AI User role..."
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$FUNCTION_SERVICE_ACCOUNT" \
+    --role="roles/aiplatform.user"
+
   # --- Ensure 'unzip' is installed for VSIX validation ---
   if ! command -v unzip &> /dev/null; then
     echo "'unzip' command not found. Attempting to install..."
@@ -188,9 +238,6 @@ echo "Activating environment './venv/python3.12'..."
 echo "Ensuring dependencies from requirements.txt are installed..."
  # Use the full path to the venv pip to ensure we're installing in the correct environment.
 ./.venv/python3.12/bin/pip install -r requirements.txt > /dev/null
-
-echo "Service account key found. Exporting GOOGLE_APPLICATION_CREDENTIALS."
-export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_KEY_FILE"
 
 # --- Create .env file for python-dotenv ---
 # This allows local development tools (like the functions-framework) to load
