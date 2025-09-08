@@ -41,23 +41,25 @@ def batch_process_documents_with_extractor(
     """
     print(f"Batch processing {len(gcs_input_uris)} documents...")
 
-    # --- FIX: Explicitly load credentials to override ambient environment ---
-    # On a Cloud Workstation or GCE VM, client libraries may default to the machine's
-    # service account. By explicitly loading credentials from the specified JSON file,
-    # we ensure the API call originates from the correct project, preventing a
-    # "Request contains an invalid argument" error due to project mismatch.
+    # When running locally, GOOGLE_APPLICATION_CREDENTIALS is set and we use the
+    # service account key to ensure the correct project is used. When running in a
+    # Vertex AI Pipeline or other managed environment, the variable is not set,
+    # and we rely on Application Default Credentials (ADC) which use the
+    # job's service account.
     credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not credentials_path:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable not set.")
-    
-    credentials = service_account.Credentials.from_service_account_file(credentials_path)
+    credentials = None
+    if credentials_path:
+        print(f"Using credentials from GOOGLE_APPLICATION_CREDENTIALS: {credentials_path}")
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+    else:
+        print("GOOGLE_APPLICATION_CREDENTIALS not set. Using Application Default Credentials (ADC).")
 
     client_options = ClientOptions(api_endpoint=f"{location}-documentai.googleapis.com")
     docai_client = documentai.DocumentProcessorServiceClient(
         credentials=credentials, client_options=client_options
     )
     storage_client = storage.Client(project=project_id, credentials=credentials)
-    
+
     print(f"Cleaning up GCS output path: {gcs_output_uri}")
     match = re.match(r"gs://([^/]+)/(.+)", gcs_output_uri)
     if match:

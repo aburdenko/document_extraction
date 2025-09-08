@@ -1,3 +1,4 @@
+setuptools
 google-generativeai
 google-cloud-aiplatform
 google-cloud-storage
