@@ -1,1 +1,3 @@
 \[DocAI Custom Extractor\] -> \[Python Script for Chunking/Embedding\] -> \[Vertex AI Vector Search\] -> \[RAG Engine\] -> \[Gemini\]
+
+Always source the file .scripts/configure.sh    

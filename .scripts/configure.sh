@@ -4,52 +4,94 @@ git config --global user.name "Alex Burdenko"
 
 # Get the absolute path of the directory containing this script.
 SCRIPT_DIR_CONFIGURE="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# Try to get project from gcloud config, otherwise prompt the user.
 
-# --- Google Credentials Setup ---
-# The service account key file should be in the root of the project directory.
+# Determine PROJECT_ID and Google Credentials Setup
+PROJECT_ID=""
 SERVICE_ACCOUNT_KEY_FILE="$SCRIPT_DIR_CONFIGURE/../../service_account.json"
 
+# 1. Prioritize service account key file if it exists
 if [ -f "$SERVICE_ACCOUNT_KEY_FILE" ]; then
-  echo "Service account key found. Using it for authentication."
+  echo "Service account key found. Using its project ID for configuration."
   export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_KEY_FILE"
-  # Dynamically determine the Project ID from the service account key to prevent mismatches.
-  export PROJECT_ID=$(jq -r .project_id "$SERVICE_ACCOUNT_KEY_FILE")
+  PROJECT_ID=$(jq -r .project_id "$SERVICE_ACCOUNT_KEY_FILE")
+  if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" == "null" ]; then
+    echo "ERROR: Could not extract project_id from service account key file." >&2
+    return 1
+  fi
 else
   echo "WARNING: Service account key file not found at '$SERVICE_ACCOUNT_KEY_FILE'."
-  echo "Falling back to user-based authentication via gcloud."
-
-  # Unset credentials variable to ensure gcloud ADC is used
+  echo "Falling back to gcloud configuration or user input for Project ID."
+  # Ensure GOOGLE_APPLICATION_CREDENTIALS is unset if no SA key, so ADC is used
   unset GOOGLE_APPLICATION_CREDENTIALS
+fi
 
+# 2. If PROJECT_ID not determined from service account, try gcloud config
+if [ -z "$PROJECT_ID" ]; then
+  CONFIGURED_PROJECT=$(gcloud config get-value project 2>/dev/null)
+  if [ -n "$CONFIGURED_PROJECT" ]; then
+    echo "Using configured gcloud project: $CONFIGURED_PROJECT"
+    PROJECT_ID=$CONFIGURED_PROJECT
+  fi
+fi
+
+# Check if the user is already logged in with ADC. If not, prompt them to log in.
+# This avoids re-prompting for login on every `source`.
+if ! gcloud auth application-default print-access-token &>/dev/null; then
+  echo "User is not logged in. Running 'gcloud auth application-default login'..."
   # Prompt user to log in. This will set up Application Default Credentials (ADC).
   if ! gcloud auth application-default login --no-launch-browser --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform; then
     echo "ERROR: gcloud auth application-default login failed." >&2
     return 1
   fi
+else
+  echo "User already logged in with Application Default Credentials."
+fi
 
-  # Try to get project from gcloud config, otherwise prompt the user.
-  CONFIGURED_PROJECT=$(gcloud config get-value project 2>/dev/null)
-  if [ -n "$CONFIGURED_PROJECT" ]; then
-    echo "Using configured gcloud project: $CONFIGURED_PROJECT"
-    export PROJECT_ID=$CONFIGURED_PROJECT
-  else
-    echo "Could not determine gcloud project. Please enter your Google Cloud Project ID:"
-    read -p "Project ID: " GCLOUD_PROJECT_ID
-    if [ -z "$GCLOUD_PROJECT_ID" ]; then
-      echo "ERROR: Project ID is required for user-based authentication." >&2
+# 3. If still no PROJECT_ID, prompt the user with a helpful list of their projects.
+if [ -z "$PROJECT_ID" ]; then
+  echo "Could not determine gcloud project. Fetching available projects for you..."
+  # Fetch projects and store them in an array.
+  # The `read` command with a process substitution is a robust way to handle this.
+  mapfile -t projects < <(gcloud projects list --format="value(projectId,name)" --sort-by=projectId)
+
+  if [ ${#projects[@]} -eq 0 ]; then
+    echo "No projects found for your account, or you may not have permission to list them."
+    echo "Please enter your Google Cloud Project ID manually:"
+    read -p "Project ID: " USER_INPUT_PROJECT_ID
+    if [ -z "$USER_INPUT_PROJECT_ID" ]; then
+      echo "ERROR: Project ID is required." >&2
       return 1
     fi
-    export PROJECT_ID=$GCLOUD_PROJECT_ID
+    PROJECT_ID=$USER_INPUT_PROJECT_ID
+  else
+    echo "Please select a project:"
+    for i in "${!projects[@]}"; do
+      printf "%3d) %s\n" "$((i+1))" "${projects[$i]}"
+    done
+    read -p "Enter number: " choice
+    # Validate that the choice is a number and within the correct range.
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#projects[@]}" ]; then
+      # Extract just the project ID from the selected line.
+      PROJECT_ID=$(echo "${projects[$((choice-1))]}" | awk '{print $1}')
+    else
+      echo "ERROR: Invalid selection." >&2
+      return 1
+    fi
   fi
+  echo "Setting active project to: $PROJECT_ID"
+  gcloud config set project "$PROJECT_ID"
 fi
+
+# Export the final PROJECT_ID
+export PROJECT_ID
+
 
 # --- Project Configuration ---
 # All project-wide configuration variables are set here.
 # These are used by the various Python scripts in this project.
 export GOOGLE_CLOUD_PROJECT=$PROJECT_ID # Also set this common env var for client libraries
 export REGION="us-central1"
-# First, ensure your gcloud CLI is configured with your project ID
-gcloud config set project $PROJECT_ID
 
 # Explicitly set the gcloud compute/region to ensure all gcloud commands and
 # some client libraries default to the correct location.
@@ -142,6 +184,9 @@ if [ ! -d ".venv/python3.12" ]; then
   gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET \
     --member="serviceAccount:$VERTEX_AI_SERVICE_AGENT" \
     --role="roles/storage.objectViewer"
+
+  gcloud services enable documentai.googleapis.com -q
+  gcloud services enable aiplatform.googleapis.com -q
 
   # Grant the Document AI Service Agent permissions for batch processing
   gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectViewer" # Read input

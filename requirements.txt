@@ -1,6 +1,6 @@
 setuptools
 google-generativeai
-google-cloud-aiplatform
+google-cloud-aiplatform>=1.47.0
 google-cloud-storage
 google-cloud-documentai
 google-cloud-logging
