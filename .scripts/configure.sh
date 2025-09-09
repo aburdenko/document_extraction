@@ -185,6 +185,9 @@ if [ ! -d ".venv/python3.12" ]; then
     --member="serviceAccount:$VERTEX_AI_SERVICE_AGENT" \
     --role="roles/storage.objectViewer"
 
+  gcloud services enable documentai.googleapis.com -q
+  gcloud services enable aiplatform.googleapis.com -q
+
   # Grant the Document AI Service Agent permissions for batch processing
   gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectViewer" # Read input
   gcloud storage buckets add-iam-policy-binding gs://$STAGING_GCS_BUCKET --member="serviceAccount:$DOCAI_SERVICE_AGENT" --role="roles/storage.objectAdmin" # Write output
