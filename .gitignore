@@ -13,3 +13,4 @@ __pycache__/
 last_run_timestamp.txt
 paul.prompt.*
 logs/
+.env
