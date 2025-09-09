@@ -173,7 +173,8 @@ if [ ! -d ".venv/python3.12" ]; then
 
   echo "Granting Service Agent permissions on GCS buckets..."
   VERTEX_AI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com"
-  DOCAI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-documentai.iam.gserviceaccount.com"
+  # DOCAI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-documentai.iam.gserviceaccount.com"
+  DOCAI_SERVICE_AGENT="my-docai-sa@$PROJECT_ID.iam.gserviceaccount.com"
 
   # Grant the Vertex AI Service Agent permission to read from buckets
   # (Needed for creating Vector Search indexes from GCS)
