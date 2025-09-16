@@ -110,7 +110,11 @@ export LOG_NAME="extract_pipeline_log"
 export GCS_DOCUMENT_URI="gs://extract_pipeline_bucket" # The document to process.
 export DOCAI_LOCATION="us" # The multi-region for the Document AI processor (e.g., 'us' or 'eu').
 export PROCESSOR_ID="faf306856e4fe9b7"
-export PROCESSOR_VERSION_ID="6d0304e3791c55fb"
+
+export DOCAI_TIMEOUT=7200 # Timeout in seconds for Document AI batch jobs. Default is 2 hours.
+#export PROCESSOR_VERSION_ID="6d0304e3791c55fb"
+export PROCESSOR_VERSION_ID="2cdafe7643d57775"
+
 #export PROCESSOR_VERSION_ID="cde-v1-2025-09-01"
 
 # --- GCS Bucket & Docker Configuration for Pipelines ---
@@ -119,6 +123,7 @@ export SOURCE_GCS_BUCKET=$(echo $GCS_DOCUMENT_URI | sed 's#gs://##' | cut -d'/' 
 export STAGING_GCS_BUCKET="${PROJECT_ID}-staging" # Bucket for pipeline artifacts and staging files
 export DOCKER_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/pipelines-repo" # Artifact Registry repo
 export GCS_OUTPUT_URI="gs://${STAGING_GCS_BUCKET}/docai-output/" # Output for batch DocAI jobs
+export GCS_RAG_TEXT_URI="gs://${SOURCE_GCS_BUCKET}/rag-engine-source-texts/" # Output for pre-processed text files for RAG Engine
 
 
 echo "Ensuring pipeline resources exist..."
@@ -173,9 +178,8 @@ if [ ! -d ".venv/python3.12" ]; then
 
   echo "Granting Service Agent permissions on GCS buckets..."
   VERTEX_AI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com"
-  # DOCAI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-documentai.iam.gserviceaccount.com"
-  DOCAI_SERVICE_AGENT="my-docai-sa@$PROJECT_ID.iam.gserviceaccount.com"
-
+  # The default service agent used by Document AI for batch processing.
+  DOCAI_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-documentai.iam.gserviceaccount.com"
   # Grant the Vertex AI Service Agent permission to read from buckets
   # (Needed for creating Vector Search indexes from GCS)
   gcloud storage buckets add-iam-policy-binding gs://$SOURCE_GCS_BUCKET \
@@ -301,6 +305,7 @@ TEMP_ENV_FILE=$(mktemp)
   echo "REGION=${REGION}"
   echo "DOCAI_LOCATION=${DOCAI_LOCATION}"
   echo "PROCESSOR_ID=${PROCESSOR_ID}"
+  echo "DOCAI_TIMEOUT=${DOCAI_TIMEOUT}"
   echo "PROCESSOR_VERSION_ID=${PROCESSOR_VERSION_ID}"
   echo "LOG_NAME=${LOG_NAME}"
   echo "DRIVE_SHARE_EMAIL=${DRIVE_SHARE_EMAIL}"
@@ -309,6 +314,7 @@ TEMP_ENV_FILE=$(mktemp)
   echo "EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME}"
   echo "SOURCE_GCS_BUCKET=${SOURCE_GCS_BUCKET}"
   echo "GCS_OUTPUT_URI=${GCS_OUTPUT_URI}"
+  echo "GCS_RAG_TEXT_URI=${GCS_RAG_TEXT_URI}"
   echo "STAGING_GCS_BUCKET=${STAGING_GCS_BUCKET}"
   echo "DOCKER_REPO=${DOCKER_REPO}"
   echo "INDEX_DISPLAY_NAME=${INDEX_DISPLAY_NAME}"

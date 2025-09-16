@@ -8,6 +8,8 @@ from google.cloud import aiplatform
 DIMENSIONS = 768  # ASSUMPTION: Based on 'text-embedding-004' model. Change if needed.
 APPROXIMATE_NEIGHBORS = 150 # ASSUMPTION: A common default for this required field.
 SHARD_SIZE = "SHARD_SIZE_MEDIUM"
+# NEW: Set the update method to allow for real-time (streaming) updates.
+INDEX_UPDATE_METHOD = "STREAM_UPDATE"
 
 # Advanced Options
 DISTANCE_MEASURE = "DOT_PRODUCT_DISTANCE"
@@ -24,6 +26,7 @@ def create_vector_search_index(
     shard_size: str,
     distance_measure_type: str,
     feature_norm_type: str,
+    index_update_method: str,
 ):
     """
     Creates a Vertex AI MatchingEngineIndex.
@@ -41,6 +44,7 @@ def create_vector_search_index(
         distance_measure_type=distance_measure_type,
         feature_norm_type=feature_norm_type,
         shard_size=shard_size,
+        index_update_method=index_update_method,
     )
 
     print("---" * 10)
@@ -89,4 +93,5 @@ if __name__ == "__main__":
         shard_size=SHARD_SIZE,
         distance_measure_type=DISTANCE_MEASURE,
         feature_norm_type=FEATURE_NORM,
+        index_update_method=INDEX_UPDATE_METHOD,
     )

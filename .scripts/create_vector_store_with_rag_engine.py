@@ -14,6 +14,7 @@ Use the `--recreate` flag to force the deletion of an existing corpus and create
 import argparse
 import logging
 from google.api_core import exceptions as google_exceptions
+import re
 import sys
 import os
 from google.cloud import storage
@@ -42,9 +43,9 @@ def main(args):
         # --- Configuration Setup ---
         project_id = args.project_id or os.getenv("PROJECT_ID")
         primary_region = args.region or os.getenv("REGION", "us-central1")
-        source_bucket = args.source_gcs_bucket or os.getenv("SOURCE_GCS_BUCKET")
+        # The script now exclusively uses a full GCS URI for its source.
+        source_gcs_uri = args.source_gcs_uri or os.getenv("GCS_RAG_TEXT_URI")
         corpus_display_name = args.corpus_display_name or os.getenv("INDEX_DISPLAY_NAME", "my-rag-corpus")
-        embedding_model_name = args.embedding_model_name or os.getenv("EMBEDDING_MODEL_NAME", "text-embedding-004")
         recreate = args.recreate
 
         # --- Validate Configuration ---
@@ -52,8 +53,8 @@ def main(args):
             logger.error("Project ID is not set. Please provide it via the --project_id flag or by editing .scripts/configure.sh")
             sys.exit(1)
 
-        if not source_bucket or "your-source-bucket-name-here" in source_bucket:
-            logger.error("Source GCS bucket is not set. Please provide it via the --source_gcs_bucket flag or by editing .scripts/configure.sh")
+        if not source_gcs_uri:
+            logger.error("Source GCS URI is not set. Please provide it via the --source_gcs_uri flag or by setting GCS_RAG_TEXT_URI in .scripts/configure.sh")
             sys.exit(1)
 
         # --- Initialization ---
@@ -70,7 +71,7 @@ def main(args):
                 logger.info(f"Found existing RAG Corpus with display name: '{corpus_display_name}' (Resource Name: {corpus.name})")
                 if recreate:
                     logger.warning(f"Recreate flag is set. Deleting existing corpus '{corpus.name}'...")
-                    corpus.delete(force=True)  # force=True to delete even if not empty
+                    rag.delete_corpus(name=corpus.name)
                     logger.info("Existing corpus deleted.")
                 else:
                     rag_corpus = corpus
@@ -84,28 +85,36 @@ def main(args):
             logger.info(f"Using existing corpus '{rag_corpus.name}' for file import.")
 
         # 2. List and Filter Files
-        logger.info(f"Listing files in GCS bucket '{source_bucket}'...")
+        logger.info(f"Listing files in GCS path '{source_gcs_uri}'...")
         storage_client = storage.Client(project=project_id)
-        bucket = storage_client.bucket(source_bucket)
+
+        # Parse the GCS URI to get bucket and prefix
+        match = re.match(r"gs://([^/]+)/(.*)", source_gcs_uri)
+        if not match:
+            logger.error(f"Invalid GCS URI format: {source_gcs_uri}")
+            sys.exit(1)
+
+        bucket_name, prefix = match.groups()
+        bucket = storage_client.bucket(bucket_name)
         
         supported_files = []
         
-        # Iterate through all blobs (files) in the bucket
-        for blob in bucket.list_blobs(prefix=None):
+        # Iterate through all blobs (files) in the bucket with the specified prefix
+        for blob in bucket.list_blobs(prefix=prefix):
             if any(blob.name.lower().endswith(ext) for ext in SUPPORTED_EXTENSIONS):
-                supported_files.append(f"gs://{source_bucket}/{blob.name}")
-            else:
-                logger.info(f"Skipping unsupported file: {blob.name}")
+                supported_files.append(f"gs://{bucket_name}/{blob.name}")
+                logger.info(f"  - Found supported file: {blob.name}")
+            elif not blob.name.endswith('/'): # Don't log directories
+                logger.info(f"  - Skipping unsupported file: {blob.name}")
 
         if not supported_files:
-            logger.error(f"No supported files found in GCS bucket 'gs://{source_bucket}'. Supported types: {SUPPORTED_EXTENSIONS}")
+            logger.error(f"No supported files found in GCS path '{source_gcs_uri}'. Supported types: {SUPPORTED_EXTENSIONS}")
             sys.exit(1)
             
         logger.info(f"Found {len(supported_files)} supported files to import.")
 
         # 3. Import Filtered Files into Corpus using batches
         logger.info(f"Starting file import into corpus '{rag_corpus.name}'...")
-        logger.info(f"Using embedding model: {embedding_model_name}")
         logger.info(f"Chunk size: {CHUNK_SIZE}, Chunk overlap: {CHUNK_OVERLAP}")
 
         # The API supports up to 100 files per import request.
@@ -120,12 +129,20 @@ def main(args):
                     chunk_size=CHUNK_SIZE,
                     chunk_overlap=CHUNK_OVERLAP,
                 )
-                logger.info(f"Import process for batch {int(i/batch_size) + 1} started. Response: {response}")
+                logger.info(f"Import API call for batch {int(i/batch_size) + 1} completed.")
+                # Provide detailed feedback based on the API response.
+                if hasattr(response, 'imported_rag_files_count') and response.imported_rag_files_count > 0:
+                    logger.info(f"  - Import process started for {response.imported_rag_files_count} new/updated files.")
+                if hasattr(response, 'skipped_rag_files_count') and response.skipped_rag_files_count > 0:
+                    logger.warning(f"  - Skipped {response.skipped_rag_files_count} files. This is expected if they have already been imported and have not changed since the last import.")
+                    logger.warning("  - If you intended to re-process all files from scratch, run this script again with the '--recreate' flag.")
+                if hasattr(response, 'failed_rag_files_count') and response.failed_rag_files_count > 0:
+                    logger.error(f"  - Failed to start import for {response.failed_rag_files_count} files. Check GCS permissions and file formats.")
             except google_exceptions.InvalidArgument as e:
                 logger.error(f"Failed to import a batch of files: {e}", exc_info=True)
                 sys.exit(1)
 
-        logger.info("Processing can take a significant amount of time depending on the number and size of files.")
+        logger.info("\nProcessing can take a significant amount of time depending on the number and size of files.")
         logger.info("You can monitor the status in the Google Cloud Console under Vertex AI -> RAG Engine.")
         logger.info("---" * 10)
         logger.info("✅ RAG Corpus processing initiated successfully!")
@@ -155,14 +172,9 @@ if __name__ == "__main__":
         help="The Google Cloud region for your resources (e.g., 'us-central1'). Overrides the $REGION environment variable.",
     )
     parser.add_argument(
-        "--source_gcs_bucket",
+        "--source_gcs_uri",
         type=str,
-        help="The name of the GCS bucket containing the source text files (without 'gs://'). Overrides $SOURCE_GCS_BUCKET.",
-    )
-    parser.add_argument(
-        "--embedding_model_name",
-        type=str,
-        help="The name of the Vertex AI embedding model to use. Overrides $EMBEDDING_MODEL_NAME.",
+        help="The GCS URI (gs://bucket/prefix) containing the source files. Overrides $GCS_RAG_TEXT_URI.",
     )
     parser.add_argument(
         "--corpus_display_name",

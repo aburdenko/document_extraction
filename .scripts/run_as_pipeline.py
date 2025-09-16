@@ -93,6 +93,7 @@ def main():
         "GCS_OUTPUT_URI": os.getenv("GCS_OUTPUT_URI"),
         "INDEX_DISPLAY_NAME": os.getenv("INDEX_DISPLAY_NAME"),
         "INDEX_ENDPOINT_DISPLAY_NAME": os.getenv("INDEX_ENDPOINT_DISPLAY_NAME"),
+        "DOCAI_TIMEOUT": os.getenv("DOCAI_TIMEOUT"),
     }
     # Filter out any keys where the value is None to avoid sending empty strings
     job_environment = {k: v for k, v in env_vars_to_pass.items() if v is not None}
