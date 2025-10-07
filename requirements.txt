@@ -13,3 +13,4 @@ pandas
 scikit-learn
 fsspec
 tabulate
+dotenv

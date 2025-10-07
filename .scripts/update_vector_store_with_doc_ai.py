@@ -9,6 +9,7 @@ This script implements the manual RAG pipeline:
 6. Upserts the vectors and their metadata into the index.
 """
 
+import logging
 import os
 import re
 import json
@@ -21,10 +22,18 @@ from google.api_core import exceptions
 from google.cloud import documentai
 from google.cloud import aiplatform
 from google.cloud import storage
+from vertexai.preview import rag
 from vertexai.language_models import TextEmbeddingModel
 from google.oauth2 import service_account
 
 CONFIDENCE_THRESHOLD = 0.9
+
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def batch_process_documents_with_extractor(
@@ -177,20 +186,22 @@ def batch_process_documents_with_extractor(
 
     try:
         operation.result(timeout=timeout)
-        print("Batch processing completed successfully.")
+        # This part is reached only if the operation succeeds without raising an exception.
+        metadata = documentai.BatchProcessMetadata.deserialize(operation.operation.metadata.value)
+        if metadata.state == documentai.BatchProcessMetadata.State.SUCCEEDED:
+             print("Batch processing completed successfully.")
+        else:
+            # This case handles when the operation finishes but has individual file failures.
+            print(f"Batch processing finished with state: {metadata.state.name}")
+            _print_operation_error_details(metadata)
+            # We will still try to parse any successful results later.
+
     except Exception as e:
         print(f"ERROR: Batch processing failed: {e}")
-        try:
-            metadata = documentai.BatchProcessMetadata.deserialize(operation.operation.metadata.value)
-            print("--- Operation Error Details ---")
-            print(f"State: {metadata.state}")
-            for process_status in metadata.individual_process_statuses:
-                if process_status.status.code != 0:
-                    print(f"  - Failed file: {process_status.input_gcs_source}")
-                    print(f"    Status: {process_status.status.message} (Code: {process_status.status.code})")
-            print("-----------------------------")
-        except Exception as meta_e:
-            print(f"Could not parse detailed operation metadata: {meta_e}")
+        # This 'except' block catches timeouts or direct API call failures (like 500 errors).
+        # We can still try to get metadata from the failed operation object.
+        if operation and operation.operation and operation.operation.metadata:
+            _print_operation_error_details_from_value(operation.operation.metadata.value)
         raise
 
     print("Parsing results from GCS output...")
@@ -218,6 +229,25 @@ def batch_process_documents_with_extractor(
 
     print(f"Successfully parsed {len(processed_documents)} documents.")
     return processed_documents
+
+def _print_operation_error_details_from_value(metadata_value: bytes):
+    """Helper to deserialize and print error details from raw metadata bytes."""
+    try:
+        metadata = documentai.BatchProcessMetadata.deserialize(metadata_value)
+        _print_operation_error_details(metadata)
+    except Exception as meta_e:
+        print(f"Could not parse detailed operation metadata: {meta_e}")
+
+def _print_operation_error_details(metadata: documentai.BatchProcessMetadata):
+    """Helper to print structured error details from a BatchProcessMetadata object."""
+    print("--- Operation Error Details ---")
+    print(f"State: {metadata.state.name}")
+    for process_status in metadata.individual_process_statuses:
+        # A status code of 0 means success.
+        if process_status.status.code != 0:
+            print(f"  - Failed file: {process_status.input_gcs_source}")
+            print(f"    Status: {process_status.status.message} (Code: {process_status.status.code})")
+    print("-----------------------------")
 
 def create_chunks_from_entities(document: documentai.Document, source_uri: str) -> List[Dict[str, Any]]:
     """
@@ -296,17 +326,21 @@ def get_gcs_files_to_process(project_id: str, gcs_uri: str) -> List[str]:
     bucket_name = parts[0]
     prefix = parts[1] if len(parts) > 1 else ""
 
-    # --- NEW: Define subdirectories to ignore ---
-    # This prevents the script from listing and skipping files in output directories
-    # that might exist within the source bucket (like the RAG engine text files).
-    ignore_prefixes = ("rag-engine-source-texts/",)
+    # --- NEW: Define output directory to ignore ---
+    # This prevents the script from trying to process its own output files if they
+    # happen to be in a subdirectory of the source URI.
+    rag_text_uri = os.getenv("GCS_RAG_TEXT_URI", "")
+    ignore_prefix = ""
+    if rag_text_uri.startswith(f"gs://{bucket_name}/"):
+        ignore_prefix = rag_text_uri.replace(f"gs://{bucket_name}/", "")
+        print(f"Will ignore any files found in the output directory: '{ignore_prefix}'")
 
     files_to_process = []
     bucket = storage_client.bucket(bucket_name)
     
     for blob in bucket.list_blobs(prefix=prefix):
-        # --- NEW: Check if the blob is in an ignored subdirectory ---
-        if any(blob.name.startswith(ignore_prefix) for ignore_prefix in ignore_prefixes):
+        # Check if the blob is in the ignored output subdirectory.
+        if ignore_prefix and blob.name.startswith(ignore_prefix):
             continue
 
         if blob.name.lower().endswith(".pdf"):
@@ -469,6 +503,77 @@ def save_chunks_as_text_files_to_gcs(
         blob.upload_from_string(full_text_content, content_type="text/plain; charset=utf-8")
         print(f"  - Saved gs://{bucket_name}/{output_blob_name}")
 
+def update_rag_corpus_from_gcs(
+    project_id: str,
+    region: str,
+    source_gcs_uri: str,
+    corpus_display_name: str,
+    recreate: bool = False,
+):
+    """
+    Finds or creates a Vertex AI RAG Corpus and imports text files from GCS.
+    This function is adapted from create_vector_store_with_rag_engine.py.
+    """
+    logger.info("--- Starting RAG Corpus Update/Creation ---")
+    aiplatform.init(project=project_id, location=region)
+
+    # 1. Find or Create RAG Corpus
+    rag_corpus = None
+    for corpus in rag.list_corpora():
+        if corpus.display_name == corpus_display_name:
+            logger.info(f"Found existing RAG Corpus: '{corpus_display_name}' ({corpus.name})")
+            if recreate:
+                logger.warning(f"Recreate flag is set. Deleting existing corpus '{corpus.name}'...")
+                rag.delete_corpus(name=corpus.name)
+                logger.info("Existing corpus deleted.")
+            else:
+                rag_corpus = corpus
+            break
+
+    if rag_corpus is None:
+        logger.info(f"Creating new RAG Corpus: '{corpus_display_name}'")
+        rag_corpus = rag.create_corpus(display_name=corpus_display_name)
+        logger.info(f"Corpus created successfully: {rag_corpus.name}")
+
+    # 2. List and Filter Files from the generated text file location
+    logger.info(f"Listing text files in GCS path '{source_gcs_uri}' to import...")
+    storage_client = storage.Client(project=project_id)
+    match = re.match(r"gs://([^/]+)/(.*)", source_gcs_uri)
+    if not match:
+        logger.error(f"Invalid GCS URI format: {source_gcs_uri}")
+        return
+
+    bucket_name, prefix = match.groups()
+    bucket = storage_client.bucket(bucket_name)
+    
+    # We only expect .txt files in this directory
+    files_to_import = [f"gs://{bucket_name}/{b.name}" for b in bucket.list_blobs(prefix=prefix) if b.name.lower().endswith('.txt')]
+
+    if not files_to_import:
+        logger.error(f"No .txt files found in '{source_gcs_uri}' to import into the RAG Corpus.")
+        return
+
+    logger.info(f"Found {len(files_to_import)} files to import into the corpus.")
+
+    # 3. Import Files into Corpus
+    # The API supports up to 100 files per import request.
+    batch_size = 100
+    for i in range(0, len(files_to_import), batch_size):
+        file_batch = files_to_import[i:i + batch_size]
+        logger.info(f"Importing batch {int(i/batch_size) + 1} of {len(files_to_import)} files...")
+        response = rag.import_files(
+            rag_corpus.name,
+            file_batch,
+            chunk_size=1024,
+            chunk_overlap=200,
+        )
+        logger.info(f"Import API call for batch {int(i/batch_size) + 1} completed.")
+
+    logger.info("\nProcessing can take a significant amount of time depending on the number and size of files.")
+    logger.info("You can monitor the status in the Google Cloud Console under Vertex AI -> RAG Engine.")
+    logger.info("---" * 10)
+    logger.info("✅ RAG Corpus processing initiated successfully!")
+
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the manual DocAI to Vector Search pipeline.")
@@ -482,14 +587,14 @@ if __name__ == "__main__":
     parser.add_argument("--gcs-output-uri", type=str, default=os.getenv("GCS_OUTPUT_URI"))
     parser.add_argument("--index-display-name", type=str, default=os.getenv("INDEX_DISPLAY_NAME"))
     parser.add_argument("--index-endpoint-display-name", type=str, default=os.getenv("INDEX_ENDPOINT_DISPLAY_NAME"))
-    parser.add_argument("--output-mode", type=str, choices=['vector-search', 'rag-engine-text-files'], default='vector-search', help="Specify the output target.")
+    parser.add_argument("--output-mode", type=str, choices=['vector-search', 'rag-engine-text-files', 'rag-engine-corpus'], default='vector-search', help="Specify the output target.")
     parser.add_argument("--gcs-rag-text-uri", type=str, default=os.getenv("GCS_RAG_TEXT_URI"), help="GCS path to save text files for RAG Engine.")
     parser.add_argument("--force-reprocess", action="store_true", help="Force reprocessing of all documents, ignoring any checkpoints.")
     parser.add_argument("--docai-timeout", type=int, default=os.getenv("DOCAI_TIMEOUT", 7200), help="Timeout in seconds for the Document AI batch processing job. Defaults to 2 hours.")
     args = parser.parse_args()
 
     required_vars = ["project_id", "region", "docai_location", "processor_id", "gcs_document_uri", "gcs_output_uri", "embedding_model_name", "index_display_name", "index_endpoint_display_name"]
-    if args.output_mode == 'rag-engine-text-files':
+    if args.output_mode in ['rag-engine-text-files', 'rag-engine-corpus']:
         required_vars.append("gcs_rag_text_uri")
 
     for var in required_vars:
@@ -598,15 +703,26 @@ if __name__ == "__main__":
             exit(0)
 
         # --- Branch logic based on the desired output ---
-        if args.output_mode == 'rag-engine-text-files':
+        if args.output_mode in ['rag-engine-text-files', 'rag-engine-corpus']:
             save_chunks_as_text_files_to_gcs(
                 project_id=args.project_id,
                 gcs_output_uri_for_rag=args.gcs_rag_text_uri,
                 processed_docs=processed_docs,
                 all_chunks=all_chunks,
             )
-            print("\n✅ Pipeline finished successfully! Text files for RAG Engine have been created.")
-            print(f"You can now run 'create_vector_store_with_rag_engine.py', which will use the files in '{args.gcs_rag_text_uri}'.")
+            if args.output_mode == 'rag-engine-text-files':
+                print("\n✅ Pipeline finished successfully! Text files for RAG Engine have been created.")
+                print(f"You can now run 'create_vector_store_with_rag_engine.py', which will use the files in '{args.gcs_rag_text_uri}'.")
+            else: # This is the new 'rag-engine-corpus' mode
+                print("\nText files created. Now triggering RAG Corpus update...")
+                update_rag_corpus_from_gcs(
+                    project_id=args.project_id,
+                    region=args.region,
+                    source_gcs_uri=args.gcs_rag_text_uri,
+                    corpus_display_name=args.index_display_name, # Re-using this for the corpus name
+                    recreate=args.force_reprocess, # If we force re-process docs, also recreate corpus
+                )
+                print("\n✅ Full RAG pipeline finished successfully!")
             exit(0) # Exit after creating text files, no further steps needed.
 
         elif args.output_mode == 'vector-search':
