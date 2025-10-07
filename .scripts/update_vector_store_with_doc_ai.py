@@ -296,10 +296,19 @@ def get_gcs_files_to_process(project_id: str, gcs_uri: str) -> List[str]:
     bucket_name = parts[0]
     prefix = parts[1] if len(parts) > 1 else ""
 
+    # --- NEW: Define subdirectories to ignore ---
+    # This prevents the script from listing and skipping files in output directories
+    # that might exist within the source bucket (like the RAG engine text files).
+    ignore_prefixes = ("rag-engine-source-texts/",)
+
     files_to_process = []
     bucket = storage_client.bucket(bucket_name)
     
     for blob in bucket.list_blobs(prefix=prefix):
+        # --- NEW: Check if the blob is in an ignored subdirectory ---
+        if any(blob.name.startswith(ignore_prefix) for ignore_prefix in ignore_prefixes):
+            continue
+
         if blob.name.lower().endswith(".pdf"):
             files_to_process.append(f"gs://{bucket_name}/{blob.name}")
             print(f"  - Found PDF: gs://{bucket_name}/{blob.name}")

@@ -7,7 +7,7 @@
       "label": "Extract Doc AI Metadata",
       "type": "shell",
       //"command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/update_vector_store_with_doc_ai.py --output-mode rag-engine-text-files --force-reprocess",
-      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/update_vector_store_with_doc_ai.py --output-mode rag-engine-text-files --force-reprocess",
+      "command": "source ${workspaceFolder}/.scripts/configure.sh && ${workspaceFolder}/.venv/python3.12/bin/python ${workspaceFolder}/.scripts/update_vector_store_with_doc_ai.py --output-mode rag-engine-text-files",
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",

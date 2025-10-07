@@ -17,6 +17,7 @@ from google.api_core import exceptions as google_exceptions
 import re
 import sys
 import os
+from dotenv import load_dotenv
 from google.cloud import storage
 
 
@@ -39,6 +40,10 @@ SUPPORTED_EXTENSIONS = ['.pdf', '.txt', '.csv', '.json', '.jsonl']
 
 def main(args):
     """Main execution function."""
+    # Load environment variables from a .env file if it exists.
+    # This is useful for local development.
+    load_dotenv()
+
     try:
         # --- Configuration Setup ---
         project_id = args.project_id or os.getenv("PROJECT_ID")

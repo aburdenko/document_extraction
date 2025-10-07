@@ -113,7 +113,8 @@ export PROCESSOR_ID="faf306856e4fe9b7"
 
 export DOCAI_TIMEOUT=7200 # Timeout in seconds for Document AI batch jobs. Default is 2 hours.
 #export PROCESSOR_VERSION_ID="6d0304e3791c55fb"
-export PROCESSOR_VERSION_ID="2cdafe7643d57775"
+#export PROCESSOR_VERSION_ID="2cdafe7643d57775"
+export PROCESSOR_VERSION_ID="d25581f62d0d8b0f"
 
 #export PROCESSOR_VERSION_ID="cde-v1-2025-09-01"
 
